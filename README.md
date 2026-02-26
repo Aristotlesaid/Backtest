@@ -99,7 +99,6 @@ pip install pandas pyyaml matplotlib pyarrow
 | `cost_etf_fee_rate` | ETF 手续费率 |
 | `cost_etf_slippage_bps` | ETF 滑点（bps） |
 | `option_prefetch_chunk_size` | 期权行情预拉取分块大小 |
-| `option_prefetch_max_symbols` | 每个方向每个到期预拉取的最大合约数（按接近ATM优先） |
 | `output_dir` | 输出目录 |
 
 ## 运行步骤
@@ -133,21 +132,6 @@ python -m AZYC001001.Modules.run_backtest --config AZYC001001/Modules/config.yam
 ### daily_pnl
 关键列：
 `date, cash_eod, option_mv_eod, etf_mv_eod, equity_eod, daily_pnl, total_pnl_cum, drawdown`
-
-
-## 数据接口独立测试脚本
-
-提供了独立脚本用于验证 `causis_api` 的接口调用方式与批量上限探测（参考 `data_example` 的调用形态）：
-
-```bash
-python scripts/test_causis_api_endpoints.py --date 2025-11-10 --option-code 159915 --start 2025-01-01 --end 2025-01-10
-```
-
-该脚本会测试：
-- `all_instruments` + `instruments` 取期权链与元数据
-- `get_price` 单标的调用（ETF）
-- `get_price` 多标的调用并二分探测较稳定的批量上限
-- 当前主程序采用的“逐日 + 逐symbol + 重试”路径
 
 ## 注意事项
 

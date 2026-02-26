@@ -318,15 +318,15 @@ class CausisDataLoader:
             try:
                 return func(*args, **kwargs)
             except Exception as exc:
-                retriable = self._is_retriable_error(exc)
-                if not retriable:
+                is_timeout = self._is_timeout_error(exc)
+                if not is_timeout:
                     raise
 
                 last_exception = exc
                 if attempt < int(max_retries):
                     wait_seconds = attempt
                     logger.warning(
-                        "Causis API请求失败（第%s/%s次尝试），%s秒后重试... (异常: %s)",
+                        "Causis API请求超时（第%s/%s次尝试），%s秒后重试... (异常: %s)",
                         attempt,
                         max_retries,
                         wait_seconds,
@@ -335,7 +335,7 @@ class CausisDataLoader:
                     time.sleep(wait_seconds)
                 else:
                     logger.error(
-                        "Causis API请求失败，已重试%s次均失败，中止操作 (异常: %s)",
+                        "Causis API请求超时，已重试%s次均失败，中止操作 (异常: %s)",
                         max_retries,
                         exc,
                     )
@@ -347,19 +347,15 @@ class CausisDataLoader:
         return None
 
     @staticmethod
-    def _is_retriable_error(exc: Exception) -> bool:
+    def _is_timeout_error(exc: Exception) -> bool:
         text = str(exc).lower()
         name = type(exc).__name__.lower()
-        transient_http = any(code in text for code in [" 429", " 500", " 502", " 503", " 504"])
         return (
             isinstance(exc, TimeoutError)
             or "timeout" in text
             or "timed out" in text
             or "connectiontimeout" in name
             or "readtimeout" in name
-            or "connectionerror" in name
-            or "remote disconnected" in text
-            or transient_http
         )
 
     @staticmethod
