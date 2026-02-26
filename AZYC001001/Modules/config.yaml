@@ -1,0 +1,22 @@
+strategy_id: AZYC001001
+etf_symbol: S.CN.SZSE.159915
+option_code: "159915"
+start_date: "2025-01-01"
+end_date: "2025-12-31"
+frequency: minute1
+
+fixed_contracts: 1
+put_offset_abs: 0.2
+call_offset_abs: 0.2
+expiry_rule: next_month_2nd
+
+min_volume_signal: 20
+min_volume_fill: 20
+
+cost_option_fee_per_contract: 0.0
+cost_option_slippage_ticks: 0.0
+cost_etf_fee_rate: 0.0
+cost_etf_slippage_bps: 0.0
+option_prefetch_chunk_size: 1
+
+output_dir: ../outputs
