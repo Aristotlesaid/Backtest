@@ -17,6 +17,7 @@ cost_option_fee_per_contract: 0.0
 cost_option_slippage_ticks: 0.0
 cost_etf_fee_rate: 0.0
 cost_etf_slippage_bps: 0.0
-option_prefetch_chunk_size: 1
+option_prefetch_chunk_size: 20
+option_prefetch_max_symbols: 12
 
 output_dir: ../outputs

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -14,6 +16,9 @@ except Exception as exc:  # pragma: no cover - import availability depends on ru
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class CausisDataLoader:
@@ -41,33 +46,16 @@ class CausisDataLoader:
         if not missing:
             return
 
-        self._check_api()
-
-        batch = max(1, int(chunk_size))
-        for i in range(0, len(missing), batch):
-            chunk = missing[i : i + batch]
-            self._prefetch_chunk_recursive(chunk)
+        # 用户要求“逐日获取，不要一口气拉很多”，这里按符号逐个触发 _load_price_bars
+        # _load_price_bars 内部会按日+重试拉取并缓存
+        for symbol in missing:
+            self._load_price_bars(symbol)
 
     def _prefetch_chunk_recursive(self, symbols: Iterable[str]) -> None:
+        """兼容旧调用路径：退化为逐个符号预拉取。"""
         chunk = [str(s) for s in symbols if s and s not in self.price_cache]
-        if not chunk:
-            return
-
-        try:
-            raw = get_price(chunk, start_date=self.start_date, end_date=self.end_date, frequency=self.frequency)
-            bars = self._normalize_price_bars(raw, default_symbol=None)
-            self._store_bars_by_symbol(bars, requested_symbols=chunk)
-            return
-        except Exception:
-            pass
-
-        if len(chunk) == 1:
-            self._load_price_bars(chunk[0])
-            return
-
-        mid = len(chunk) // 2
-        self._prefetch_chunk_recursive(chunk[:mid])
-        self._prefetch_chunk_recursive(chunk[mid:])
+        for symbol in chunk:
+            self._load_price_bars(symbol)
 
     def load_option_chain(self, trade_date: date) -> pd.DataFrame:
         key = trade_date.isoformat()
@@ -75,7 +63,7 @@ class CausisDataLoader:
             return self.option_chain_cache[key].copy()
 
         self._check_api()
-        raw_chain = all_instruments("O", key)
+        raw_chain = self._retry_on_timeout(all_instruments, "O", key)
         if raw_chain is None:
             chain = self._empty_chain()
             self.option_chain_cache[key] = chain
@@ -97,24 +85,33 @@ class CausisDataLoader:
             if col not in chain.columns:
                 chain[col] = pd.NA
 
-        symbols = sorted(chain["Symbol"].dropna().unique().tolist())
-        metadata = self._fetch_metadata(symbols)
-        if not metadata.empty:
-            chain = chain.drop(columns=["OptType", "Strike", "MinTick", "Multiplier"], errors="ignore")
-            chain = chain.merge(metadata, on="Symbol", how="left")
+        chain["OptType"] = chain["OptType"].astype(str).str.title()
+        chain["Strike"] = pd.to_numeric(chain["Strike"], errors="coerce")
+        chain["MinTick"] = pd.to_numeric(chain["MinTick"], errors="coerce")
+        chain["Multiplier"] = pd.to_numeric(chain["Multiplier"], errors="coerce")
 
-        missing = chain[
-            chain[["OptType", "Strike", "Multiplier"]].isna().any(axis=1)
-        ]["Symbol"].dropna().unique().tolist()
-        for symbol in missing:
-            one = self._fetch_metadata([symbol])
-            if one.empty:
-                continue
-            row = one.iloc[0]
-            idx = chain["Symbol"] == symbol
-            for col in ["OptType", "Strike", "MinTick", "Multiplier"]:
-                if col in row:
-                    chain.loc[idx & chain[col].isna(), col] = row[col]
+        missing_mask = chain[["OptType", "Strike", "Multiplier"]].isna().any(axis=1)
+        missing_symbols = sorted(chain.loc[missing_mask, "Symbol"].dropna().unique().tolist())
+
+        if missing_symbols:
+            metadata = self._fetch_metadata(missing_symbols)
+            if not metadata.empty:
+                metadata = metadata.set_index("Symbol")
+                for col in ["OptType", "Strike", "MinTick", "Multiplier"]:
+                    mapped = chain["Symbol"].map(metadata[col])
+                    chain[col] = chain[col].where(chain[col].notna(), mapped)
+
+            residual_mask = chain[["OptType", "Strike", "Multiplier"]].isna().any(axis=1)
+            residual_symbols = sorted(chain.loc[residual_mask, "Symbol"].dropna().unique().tolist())
+            for symbol in residual_symbols:
+                one = self._fetch_metadata([symbol])
+                if one.empty:
+                    continue
+                row = one.iloc[0]
+                idx = chain["Symbol"] == symbol
+                for col in ["OptType", "Strike", "MinTick", "Multiplier"]:
+                    if col in row:
+                        chain.loc[idx & chain[col].isna(), col] = row[col]
 
         chain["EndDate"] = pd.to_datetime(chain.get("EndDate"), errors="coerce").dt.date
         chain["OptType"] = chain["OptType"].astype(str).str.title()
@@ -182,41 +179,35 @@ class CausisDataLoader:
 
         self._check_api()
 
-        try:
-            raw = get_price(symbol, start_date=self.start_date, end_date=self.end_date, frequency=self.frequency)
-            bars = self._normalize_price_bars(raw, default_symbol=symbol)
-            if bars.empty:
-                bars = self._empty_bars(symbol)
-            self.price_cache[symbol] = bars
-            return bars.copy()
-        except Exception:
-            pass
-
-        bars = self._fetch_price_bars_segmented(symbol)
+        bars = self._fetch_price_bars_daily(symbol)
         self.price_cache[symbol] = bars
         return bars.copy()
 
-    def _fetch_price_bars_segmented(self, symbol: str, segment_days: int = 45) -> pd.DataFrame:
+    def _fetch_price_bars_daily(self, symbol: str) -> pd.DataFrame:
         start = pd.Timestamp(self.start_date)
         end = pd.Timestamp(self.end_date)
 
         frames = []
         cursor = start
         while cursor <= end:
-            seg_end = min(cursor + pd.Timedelta(days=max(1, int(segment_days)) - 1), end)
+            date_str = cursor.strftime("%Y-%m-%d")
             try:
-                raw = get_price(
+                raw = self._retry_on_timeout(
+                    get_price,
                     symbol,
-                    start_date=cursor.strftime("%Y-%m-%d"),
-                    end_date=seg_end.strftime("%Y-%m-%d"),
+                    start_date=date_str,
+                    end_date=date_str,
                     frequency=self.frequency,
                 )
-                frame = self._normalize_price_bars(raw, default_symbol=symbol)
-                if not frame.empty:
-                    frames.append(frame)
-            except Exception:
-                pass
-            cursor = seg_end + pd.Timedelta(days=1)
+            except Exception as exc:
+                logger.warning("get_price(%s, %s) 失败，跳过该日: %s", symbol, date_str, exc)
+                cursor += pd.Timedelta(days=1)
+                continue
+
+            frame = self._normalize_price_bars(raw, default_symbol=symbol)
+            if not frame.empty:
+                frames.append(frame)
+            cursor += pd.Timedelta(days=1)
 
         if not frames:
             return self._empty_bars(symbol)
@@ -295,11 +286,7 @@ class CausisDataLoader:
         self._check_api()
         frames = []
 
-        try:
-            bulk = instruments(symbols)
-        except Exception:
-            bulk = None
-
+        bulk = self._retry_on_timeout(instruments, symbols)
         normalized_bulk = self._normalize_metadata_frame(bulk)
         if not normalized_bulk.empty:
             frames.append(normalized_bulk)
@@ -308,10 +295,7 @@ class CausisDataLoader:
         for symbol in symbols:
             if symbol in fetched:
                 continue
-            try:
-                one = instruments(symbol)
-            except Exception:
-                continue
+            one = self._retry_on_timeout(instruments, symbol)
             normalized_one = self._normalize_metadata_frame(one)
             if not normalized_one.empty:
                 frames.append(normalized_one)
@@ -326,6 +310,57 @@ class CausisDataLoader:
         metadata["Multiplier"] = pd.to_numeric(metadata["Multiplier"], errors="coerce")
         metadata = metadata[["Symbol", "OptType", "Strike", "MinTick", "Multiplier"]]
         return metadata
+
+    def _retry_on_timeout(self, func, *args, max_retries: int = 3, **kwargs):
+        last_exception = None
+
+        for attempt in range(1, int(max_retries) + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as exc:
+                retriable = self._is_retriable_error(exc)
+                if not retriable:
+                    raise
+
+                last_exception = exc
+                if attempt < int(max_retries):
+                    wait_seconds = attempt
+                    logger.warning(
+                        "Causis API请求失败（第%s/%s次尝试），%s秒后重试... (异常: %s)",
+                        attempt,
+                        max_retries,
+                        wait_seconds,
+                        exc,
+                    )
+                    time.sleep(wait_seconds)
+                else:
+                    logger.error(
+                        "Causis API请求失败，已重试%s次均失败，中止操作 (异常: %s)",
+                        max_retries,
+                        exc,
+                    )
+                    raise
+
+        if last_exception is not None:
+            raise last_exception
+
+        return None
+
+    @staticmethod
+    def _is_retriable_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        name = type(exc).__name__.lower()
+        transient_http = any(code in text for code in [" 429", " 500", " 502", " 503", " 504"])
+        return (
+            isinstance(exc, TimeoutError)
+            or "timeout" in text
+            or "timed out" in text
+            or "connectiontimeout" in name
+            or "readtimeout" in name
+            or "connectionerror" in name
+            or "remote disconnected" in text
+            or transient_http
+        )
 
     @staticmethod
     def _normalize_metadata_frame(raw: Any) -> pd.DataFrame:

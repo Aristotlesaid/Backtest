@@ -51,6 +51,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cost_etf_fee_rate": 0.0,
     "cost_etf_slippage_bps": 0.0,
     "option_prefetch_chunk_size": 20,
+    "option_prefetch_max_symbols": 12,
     "output_dir": "outputs/AZYC001001",
 }
 
@@ -190,7 +191,7 @@ class WheelBacktestEngine:
         if option_chain.empty:
             return False
 
-        self._prefetch_chain_side(option_chain, trade_date, opt_type="Put")
+        self._prefetch_chain_side(option_chain, day_bars, trade_date, opt_type="Put")
         qty_contracts = max(1, int(self.config["fixed_contracts"]))
 
         for row in day_bars.itertuples(index=False):
@@ -211,7 +212,7 @@ class WheelBacktestEngine:
 
         return False
 
-    def _prefetch_chain_side(self, option_chain: pd.DataFrame, trade_date, opt_type: str) -> None:
+    def _prefetch_chain_side(self, option_chain: pd.DataFrame, day_bars: pd.DataFrame, trade_date, opt_type: str) -> None:
         if option_chain.empty:
             return
 
@@ -225,7 +226,24 @@ class WheelBacktestEngine:
             return
 
         target_expiry = expiries[1] if len(expiries) >= 2 else expiries[0]
-        target_symbols = side_chain[side_chain["EndDate"] == target_expiry]["Symbol"].dropna().unique().tolist()
+        target_chain = side_chain[side_chain["EndDate"] == target_expiry].copy()
+        if target_chain.empty:
+            return
+
+        if day_bars.empty:
+            ref_spot = float(target_chain["Strike"].median())
+        else:
+            ref_spot = float(day_bars.iloc[0]["CLOSE"])
+
+        max_symbols = max(1, int(self.config.get("option_prefetch_max_symbols", 12)))
+        target_chain["distance"] = (pd.to_numeric(target_chain["Strike"], errors="coerce") - ref_spot).abs()
+        target_symbols = (
+            target_chain.sort_values(["distance", "Strike", "Symbol"], na_position="last")["Symbol"]
+            .dropna()
+            .head(max_symbols)
+            .astype(str)
+            .tolist()
+        )
         if not target_symbols:
             return
 
@@ -239,7 +257,7 @@ class WheelBacktestEngine:
         if option_chain.empty:
             return False
 
-        self._prefetch_chain_side(option_chain, trade_date, opt_type="Call")
+        self._prefetch_chain_side(option_chain, day_bars, trade_date, opt_type="Call")
         for row in day_bars.itertuples(index=False):
             signal_ts = pd.Timestamp(row.CLOCK)
             spot_price = float(row.CLOSE)
