@@ -191,13 +191,19 @@ class CausisDataLoader:
         cursor = start
         while cursor <= end:
             date_str = cursor.strftime("%Y-%m-%d")
-            raw = self._retry_on_timeout(
-                get_price,
-                symbol,
-                start_date=date_str,
-                end_date=date_str,
-                frequency=self.frequency,
-            )
+            try:
+                raw = self._retry_on_timeout(
+                    get_price,
+                    symbol,
+                    start_date=date_str,
+                    end_date=date_str,
+                    frequency=self.frequency,
+                )
+            except Exception as exc:
+                logger.warning("get_price(%s, %s) 失败，跳过该日: %s", symbol, date_str, exc)
+                cursor += pd.Timedelta(days=1)
+                continue
+
             frame = self._normalize_price_bars(raw, default_symbol=symbol)
             if not frame.empty:
                 frames.append(frame)
