@@ -50,8 +50,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "cost_option_slippage_ticks": 0.0,
     "cost_etf_fee_rate": 0.0,
     "cost_etf_slippage_bps": 0.0,
-    "option_prefetch_chunk_size": 20,
-    "option_prefetch_max_symbols": 12,
+    "use_disk_cache": True,
+    "cache_dir": "../cache",
     "output_dir": "outputs/AZYC001001",
 }
 
@@ -122,6 +122,8 @@ class WheelBacktestEngine:
             end_date=config["end_date"],
             frequency=config["frequency"],
             option_code=config["option_code"],
+            use_disk_cache=bool(config.get("use_disk_cache", True)),
+            cache_dir=config.get("cache_dir"),
         )
         self.selector = ContractSelector(
             put_offset_abs=float(config["put_offset_abs"]),
@@ -148,7 +150,7 @@ class WheelBacktestEngine:
         etf_bars["trade_date"] = etf_bars["CLOCK"].dt.date
 
         for trade_date, day_bars in etf_bars.groupby("trade_date", sort=True):
-            day_bars = day_bars.sort_values("CLOCK").reset_index(drop=True)
+            day_bars = day_bars.reset_index(drop=True).sort_values("CLOCK").reset_index(drop=True)
             eod_row = self.loader.pick_eod_bar(day_bars)
 
             if self.state.state == STATE_FLAT:
@@ -191,7 +193,6 @@ class WheelBacktestEngine:
         if option_chain.empty:
             return False
 
-        self._prefetch_chain_side(option_chain, day_bars, trade_date, opt_type="Put")
         qty_contracts = max(1, int(self.config["fixed_contracts"]))
 
         for row in day_bars.itertuples(index=False):
@@ -212,52 +213,11 @@ class WheelBacktestEngine:
 
         return False
 
-    def _prefetch_chain_side(self, option_chain: pd.DataFrame, day_bars: pd.DataFrame, trade_date, opt_type: str) -> None:
-        if option_chain.empty:
-            return
-
-        side_chain = option_chain[option_chain["OptType"].astype(str).str.title() == str(opt_type).title()].copy()
-        if side_chain.empty:
-            return
-
-        expiries = sorted({pd.to_datetime(x, errors="coerce").date() for x in side_chain["EndDate"].dropna().tolist() if pd.notna(pd.to_datetime(x, errors="coerce"))})
-        expiries = [e for e in expiries if e is not None and e >= trade_date]
-        if not expiries:
-            return
-
-        target_expiry = expiries[1] if len(expiries) >= 2 else expiries[0]
-        target_chain = side_chain[side_chain["EndDate"] == target_expiry].copy()
-        if target_chain.empty:
-            return
-
-        if day_bars.empty:
-            ref_spot = float(target_chain["Strike"].median())
-        else:
-            ref_spot = float(day_bars.iloc[0]["CLOSE"])
-
-        max_symbols = max(1, int(self.config.get("option_prefetch_max_symbols", 12)))
-        target_chain["distance"] = (pd.to_numeric(target_chain["Strike"], errors="coerce") - ref_spot).abs()
-        target_symbols = (
-            target_chain.sort_values(["distance", "Strike", "Symbol"], na_position="last")["Symbol"]
-            .dropna()
-            .head(max_symbols)
-            .astype(str)
-            .tolist()
-        )
-        if not target_symbols:
-            return
-
-        self.loader.prefetch_option_bars(
-            target_symbols,
-            chunk_size=int(self.config.get("option_prefetch_chunk_size", 20)),
-        )
-
     def _scan_open_call(self, day_bars: pd.DataFrame, trade_date) -> bool:
         option_chain = self.loader.load_option_chain(trade_date)
         if option_chain.empty:
             return False
 
-        self._prefetch_chain_side(option_chain, day_bars, trade_date, opt_type="Call")
         for row in day_bars.itertuples(index=False):
             signal_ts = pd.Timestamp(row.CLOCK)
             spot_price = float(row.CLOSE)
@@ -662,7 +622,14 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["cost_option_slippage_ticks"] = float(cfg["cost_option_slippage_ticks"])
     cfg["cost_etf_fee_rate"] = float(cfg["cost_etf_fee_rate"])
     cfg["cost_etf_slippage_bps"] = float(cfg["cost_etf_slippage_bps"])
-    cfg["option_prefetch_chunk_size"] = int(cfg.get("option_prefetch_chunk_size", 20))
+    cfg["use_disk_cache"] = bool(cfg.get("use_disk_cache", True))
+
+    cache_dir = cfg.get("cache_dir")
+    if cache_dir:
+        cache_path = Path(cache_dir)
+        if not cache_path.is_absolute():
+            cache_path = (Path(cfg["_config_dir"]) / cache_path).resolve()
+        cfg["cache_dir"] = str(cache_path)
 
     return cfg
 

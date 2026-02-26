@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import pandas as pd
+from causis_api.const import login
+
+login.username = "jinqiao.xue"
+login.password = "1101BX@causis"
 
 try:
     from causis_api.data import all_instruments, get_price, instruments
@@ -22,11 +28,27 @@ logger = logging.getLogger(__name__)
 
 
 class CausisDataLoader:
-    def __init__(self, start_date: str, end_date: str, frequency: str, option_code: str):
+    def __init__(
+        self,
+        start_date: str,
+        end_date: str,
+        frequency: str,
+        option_code: str,
+        use_disk_cache: bool = True,
+        cache_dir: Optional[str] = None,
+    ):
         self.start_date = str(start_date)
         self.end_date = str(end_date)
         self.frequency = str(frequency)
         self.option_code = str(option_code)
+
+        self.use_disk_cache = bool(use_disk_cache)
+        self.cache_dir = Path(cache_dir).expanduser().resolve() if cache_dir else (Path.cwd() / "cache").resolve()
+        self.price_cache_dir = self.cache_dir / "price"
+        self.chain_cache_dir = self.cache_dir / "option_chain"
+        if self.use_disk_cache:
+            self.price_cache_dir.mkdir(parents=True, exist_ok=True)
+            self.chain_cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.option_chain_cache: Dict[str, pd.DataFrame] = {}
         self.price_cache: Dict[str, pd.DataFrame] = {}
@@ -37,32 +59,21 @@ class CausisDataLoader:
     def load_option_bars(self, symbol: str) -> pd.DataFrame:
         return self._load_price_bars(symbol)
 
-    def prefetch_option_bars(self, symbols: Iterable[str], chunk_size: int = 20) -> None:
-        requested = [str(s) for s in symbols if s]
-        if not requested:
-            return
-
-        missing = [s for s in requested if s not in self.price_cache]
-        if not missing:
-            return
-
-        # 用户要求“逐日获取，不要一口气拉很多”，这里按符号逐个触发 _load_price_bars
-        # _load_price_bars 内部会按日+重试拉取并缓存
-        for symbol in missing:
-            self._load_price_bars(symbol)
-
-    def _prefetch_chunk_recursive(self, symbols: Iterable[str]) -> None:
-        """兼容旧调用路径：退化为逐个符号预拉取。"""
-        chunk = [str(s) for s in symbols if s and s not in self.price_cache]
-        for symbol in chunk:
-            self._load_price_bars(symbol)
-
     def load_option_chain(self, trade_date: date) -> pd.DataFrame:
         key = trade_date.isoformat()
         if key in self.option_chain_cache:
             return self.option_chain_cache[key].copy()
 
+        cache_path = self._chain_cache_path(key)
+        if self.use_disk_cache and cache_path.exists():
+            chain = pd.read_parquet(cache_path)
+            if not chain.empty and {"Symbol", "EndDate", "OptType", "Strike", "Multiplier"}.issubset(set(chain.columns)):
+                chain["EndDate"] = pd.to_datetime(chain["EndDate"], errors="coerce").dt.date
+                self.option_chain_cache[key] = chain
+                return chain.copy()
+
         self._check_api()
+        # all_instruments only accepts a single date.
         raw_chain = self._retry_on_timeout(all_instruments, "O", key)
         if raw_chain is None:
             chain = self._empty_chain()
@@ -85,7 +96,6 @@ class CausisDataLoader:
             if col not in chain.columns:
                 chain[col] = pd.NA
 
-        chain["OptType"] = chain["OptType"].astype(str).str.title()
         chain["Strike"] = pd.to_numeric(chain["Strike"], errors="coerce")
         chain["MinTick"] = pd.to_numeric(chain["MinTick"], errors="coerce")
         chain["Multiplier"] = pd.to_numeric(chain["Multiplier"], errors="coerce")
@@ -101,18 +111,6 @@ class CausisDataLoader:
                     mapped = chain["Symbol"].map(metadata[col])
                     chain[col] = chain[col].where(chain[col].notna(), mapped)
 
-            residual_mask = chain[["OptType", "Strike", "Multiplier"]].isna().any(axis=1)
-            residual_symbols = sorted(chain.loc[residual_mask, "Symbol"].dropna().unique().tolist())
-            for symbol in residual_symbols:
-                one = self._fetch_metadata([symbol])
-                if one.empty:
-                    continue
-                row = one.iloc[0]
-                idx = chain["Symbol"] == symbol
-                for col in ["OptType", "Strike", "MinTick", "Multiplier"]:
-                    if col in row:
-                        chain.loc[idx & chain[col].isna(), col] = row[col]
-
         chain["EndDate"] = pd.to_datetime(chain.get("EndDate"), errors="coerce").dt.date
         chain["OptType"] = chain["OptType"].astype(str).str.title()
         chain["Strike"] = pd.to_numeric(chain["Strike"], errors="coerce")
@@ -127,6 +125,9 @@ class CausisDataLoader:
         keep_cols = ["Symbol", "OptType", "Strike", "EndDate", "MinTick", "Multiplier"]
         chain = chain[keep_cols].drop_duplicates(subset=["Symbol"], keep="last")
         chain = chain.sort_values(["EndDate", "OptType", "Strike", "Symbol"]).reset_index(drop=True)
+
+        if self.use_disk_cache:
+            chain.to_parquet(cache_path, index=False)
 
         self.option_chain_cache[key] = chain
         return chain.copy()
@@ -177,9 +178,19 @@ class CausisDataLoader:
         if symbol in self.price_cache:
             return self.price_cache[symbol].copy()
 
-        self._check_api()
+        cache_path = self._price_cache_path(symbol)
+        if self.use_disk_cache and cache_path.exists():
+            bars = pd.read_parquet(cache_path)
+            bars = self._postprocess_bars_frame(bars, symbol)
+            self.price_cache[symbol] = bars
+            return bars.copy()
 
+        self._check_api()
         bars = self._fetch_price_bars_daily(symbol)
+
+        if self.use_disk_cache:
+            bars.reset_index(drop=True).to_parquet(cache_path, index=False)
+
         self.price_cache[symbol] = bars
         return bars.copy()
 
@@ -200,7 +211,7 @@ class CausisDataLoader:
                     frequency=self.frequency,
                 )
             except Exception as exc:
-                logger.warning("get_price(%s, %s) 失败，跳过该日: %s", symbol, date_str, exc)
+                logger.warning("get_price(%s, %s) failed, skip day: %s", symbol, date_str, exc)
                 cursor += pd.Timedelta(days=1)
                 continue
 
@@ -213,6 +224,7 @@ class CausisDataLoader:
             return self._empty_bars(symbol)
 
         bars = pd.concat(frames, ignore_index=False)
+        bars = bars.reset_index(drop=True)
         bars = bars.sort_values("CLOCK").drop_duplicates(subset=["CLOCK"], keep="last")
         return bars.set_index("CLOCK", drop=False)
 
@@ -253,30 +265,30 @@ class CausisDataLoader:
 
         return bars
 
-    def _store_bars_by_symbol(self, bars: pd.DataFrame, requested_symbols: Iterable[str]) -> None:
-        symbols = [str(s) for s in requested_symbols if s]
+    def _postprocess_bars_frame(self, bars: pd.DataFrame, symbol: str) -> pd.DataFrame:
         if bars.empty:
-            for symbol in symbols:
-                if symbol not in self.price_cache:
-                    self.price_cache[symbol] = self._empty_bars(symbol)
-            return
+            return self._empty_bars(symbol)
 
-        if "SYMBOL" not in bars.columns:
-            for symbol in symbols:
-                if symbol not in self.price_cache:
-                    self.price_cache[symbol] = self._empty_bars(symbol)
-            return
+        frame = bars.copy()
+        frame.columns = [str(c).upper() for c in frame.columns]
+        if "CLOCK" not in frame.columns:
+            return self._empty_bars(symbol)
 
-        grouped = bars.groupby("SYMBOL", sort=False)
-        for symbol, frame in grouped:
-            frame = frame[["SYMBOL", "CLOCK", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]].copy()
-            frame = frame.sort_values("CLOCK").drop_duplicates(subset=["CLOCK"], keep="last")
-            frame = frame.set_index("CLOCK", drop=False)
-            self.price_cache[str(symbol)] = frame
+        frame["CLOCK"] = pd.to_datetime(frame["CLOCK"], errors="coerce")
+        frame = frame.dropna(subset=["CLOCK"]).copy().reset_index(drop=True)
+        for col in ["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]:
+            if col in frame.columns:
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+            else:
+                frame[col] = pd.NA
 
-        for symbol in symbols:
-            if symbol not in self.price_cache:
-                self.price_cache[symbol] = self._empty_bars(symbol)
+        if "SYMBOL" not in frame.columns:
+            frame["SYMBOL"] = symbol
+        frame["SYMBOL"] = frame["SYMBOL"].fillna(symbol)
+
+        frame = frame[["SYMBOL", "CLOCK", "OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]]
+        frame = frame.sort_values("CLOCK").drop_duplicates(subset=["CLOCK"], keep="last")
+        return frame.set_index("CLOCK", drop=False)
 
     def _fetch_metadata(self, symbols: Iterable[str]) -> pd.DataFrame:
         symbols = [str(s) for s in symbols if s]
@@ -326,7 +338,7 @@ class CausisDataLoader:
                 if attempt < int(max_retries):
                     wait_seconds = attempt
                     logger.warning(
-                        "Causis API请求超时（第%s/%s次尝试），%s秒后重试... (异常: %s)",
+                        "Causis API timeout (%s/%s), retry in %ss... (%s)",
                         attempt,
                         max_retries,
                         wait_seconds,
@@ -334,11 +346,7 @@ class CausisDataLoader:
                     )
                     time.sleep(wait_seconds)
                 else:
-                    logger.error(
-                        "Causis API请求超时，已重试%s次均失败，中止操作 (异常: %s)",
-                        max_retries,
-                        exc,
-                    )
+                    logger.error("Causis API timeout after %s retries: %s", max_retries, exc)
                     raise
 
         if last_exception is not None:
@@ -421,9 +429,20 @@ class CausisDataLoader:
     def _empty_metadata() -> pd.DataFrame:
         return pd.DataFrame(columns=["Symbol", "OptType", "Strike", "MinTick", "Multiplier"])
 
+    def _price_cache_path(self, symbol: str) -> Path:
+        safe = self._safe_name(symbol)
+        return self.price_cache_dir / f"{safe}__{self.start_date}_{self.end_date}_{self.frequency}.parquet"
+
+    def _chain_cache_path(self, day_key: str) -> Path:
+        safe_code = self._safe_name(self.option_code)
+        safe_day = self._safe_name(day_key)
+        return self.chain_cache_dir / f"{safe_code}__{safe_day}.parquet"
+
+    @staticmethod
+    def _safe_name(value: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+
     @staticmethod
     def _check_api() -> None:
         if all_instruments is None or get_price is None or instruments is None:
-            raise ImportError(
-                "causis_api is not available in current environment."
-            ) from _IMPORT_ERROR
+            raise ImportError("causis_api is not available in current environment.") from _IMPORT_ERROR
