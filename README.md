@@ -99,7 +99,6 @@ pip install pandas pyyaml matplotlib pyarrow
 | `cost_etf_fee_rate` | ETF 手续费率 |
 | `cost_etf_slippage_bps` | ETF 滑点（bps） |
 | `option_prefetch_chunk_size` | 期权行情预拉取分块大小 |
-| `option_prefetch_max_symbols` | 每个方向每个到期预拉取的最大合约数（按接近ATM优先） |
 | `output_dir` | 输出目录 |
 
 ## 运行步骤
