@@ -23,9 +23,9 @@ def run_backtest(config_path: str):
     return backtest_mod.run_backtest(config_path)
 
 
-def analyze(result_dir: str):
+def analyze(result_dir: str, **kwargs):
     _, analyze_mod = _reload_runtime_modules()
-    return analyze_mod.analyze(result_dir)
+    return analyze_mod.analyze(result_dir, **kwargs)
 
 
 __all__ = ['run_backtest', 'analyze']

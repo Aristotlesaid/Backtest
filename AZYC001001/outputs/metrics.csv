@@ -1,2 +1,2 @@
-total_pnl,max_drawdown,trade_count,put_sell_count,call_sell_count,assignment_count,call_away_count,win_rate_cycle,avg_cycle_days
-5104.0,-2685.0,13,5,2,1,1,1.0,88.47552083333333
+initial_capital,total_pnl,total_return,benchmark_return,excess_return,excess_pnl,annual_return_simple,annual_volatility,sharpe,sortino,calmar,tracking_error_annual,information_ratio,max_drawdown,max_drawdown_pct,trading_days,trade_count,put_sell_count,call_sell_count,assignment_count,call_away_count,cycle_count_closed,cycle_count_open,win_rate_cycle,avg_cycle_days,day_win_rate,profit_factor_day
+1000000.0,74415.0,0.074415,0.3918732869999999,-0.3174582869999999,-317458.287,0.025794470426409904,0.0727306612016616,0.3546574443327156,0.17859791623395518,0.2381409064811284,0.3124224811836491,-0.45218012062219115,-108316.0,-0.108316,727,37,37,0,0,0,36,1,1.0,29.377276234567905,0.4951856946354883,1.3174322179944375

@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -36,22 +37,27 @@ except ImportError:  # pragma: no cover
 DEFAULT_CONFIG: Dict[str, Any] = {
     "strategy_id": "AZYC001001",
     "etf_symbol": "S.CN.SZSE.159915",
-    "option_code": "159915",
+    "option_code": "",
     "start_date": "2025-01-01",
     "end_date": "2025-12-31",
     "frequency": "minute1",
     "fixed_contracts": 1,
     "put_offset_abs": 0.2,
     "call_offset_abs": 0.2,
-    "expiry_rule": "next_month_2nd",
+    "expiry_rule": "near_month",
     "min_volume_signal": 20,
     "min_volume_fill": 20,
     "cost_option_fee_per_contract": 0.0,
     "cost_option_slippage_ticks": 0.0,
     "cost_etf_fee_rate": 0.0,
     "cost_etf_slippage_bps": 0.0,
+    "initial_capital": 1_000_000.0,
+    "contract_sizing": "capital",
+    "risk_free_rate": 0.0,
     "use_disk_cache": True,
-    "cache_dir": "../cache",
+    "cache_dir": "../../DataCache",
+    "entry_start_time": "09:45:00",
+    "trade_start_offset_days": 1,
     "output_dir": "outputs/AZYC001001",
 }
 
@@ -141,6 +147,12 @@ class WheelBacktestEngine:
         self._prev_equity = 0.0
         self._equity_peak = 0.0
 
+        # 起始日后延迟几天才允许首次开仓。
+        self.trade_start_date = (
+            pd.Timestamp(self.config["start_date"]).date()
+            + pd.Timedelta(days=int(self.config.get("trade_start_offset_days", 1)))
+        )
+
     def run(self) -> Dict[str, pd.DataFrame]:
         etf_bars = self.loader.load_etf_bars(self.config["etf_symbol"])
         if etf_bars.empty:
@@ -153,9 +165,16 @@ class WheelBacktestEngine:
             day_bars = day_bars.reset_index(drop=True).sort_values("CLOCK").reset_index(drop=True)
             eod_row = self.loader.pick_eod_bar(day_bars)
 
-            if self.state.state == STATE_FLAT:
+            # 仅在允许开仓日之后扫描入场。
+            can_open_today = trade_date >= self.trade_start_date
+            if self.state.state == STATE_FLAT and can_open_today:
                 self._scan_open_put(day_bars, trade_date)
-            elif self.state.state == STATE_LONG_ETF_SHORT_CALL and self.state.option_leg is None and self.state.etf_qty > 0:
+            elif (
+                self.state.state == STATE_LONG_ETF_SHORT_CALL
+                and self.state.option_leg is None
+                and self.state.etf_qty > 0
+                and can_open_today
+            ):
                 self._scan_open_call(day_bars, trade_date)
 
             if self.state.option_leg is not None and self.state.option_leg.expiry == trade_date:
@@ -189,17 +208,22 @@ class WheelBacktestEngine:
         }
 
     def _scan_open_put(self, day_bars: pd.DataFrame, trade_date) -> bool:
+        day_bars = self._filter_entry_window(day_bars)
+        if day_bars.empty:
+            return False
+
         option_chain = self.loader.load_option_chain(trade_date)
         if option_chain.empty:
             return False
-
-        qty_contracts = max(1, int(self.config["fixed_contracts"]))
 
         for row in day_bars.itertuples(index=False):
             signal_ts = pd.Timestamp(row.CLOCK)
             spot_price = float(row.CLOSE)
             contract = self.selector.select_put_contract(option_chain, trade_date, spot_price)
             if not contract:
+                continue
+            qty_contracts = self._resolve_put_qty(contract, spot_price)
+            if qty_contracts <= 0:
                 continue
 
             opened = self._try_open_short_option(
@@ -214,6 +238,10 @@ class WheelBacktestEngine:
         return False
 
     def _scan_open_call(self, day_bars: pd.DataFrame, trade_date) -> bool:
+        day_bars = self._filter_entry_window(day_bars)
+        if day_bars.empty:
+            return False
+
         option_chain = self.loader.load_option_chain(trade_date)
         if option_chain.empty:
             return False
@@ -226,7 +254,7 @@ class WheelBacktestEngine:
                 continue
 
             max_cover_qty = self.state.etf_qty // int(contract["Multiplier"])
-            qty_contracts = min(max(1, int(self.config["fixed_contracts"])), int(max_cover_qty))
+            qty_contracts = self._resolve_call_qty(max_cover_qty)
             if qty_contracts <= 0:
                 continue
 
@@ -240,6 +268,38 @@ class WheelBacktestEngine:
                 return True
 
         return False
+
+    def _filter_entry_window(self, day_bars: pd.DataFrame) -> pd.DataFrame:
+        # 日内只在设定时点后扫描开仓信号。
+        start_time = pd.to_datetime(str(self.config.get("entry_start_time", "09:45:00"))).time()
+        return day_bars[day_bars["CLOCK"].dt.time >= start_time].copy()
+
+    def _resolve_put_qty(self, contract: Dict[str, Any], spot_price: float) -> int:
+        mode = str(self.config.get("contract_sizing", "capital")).strip().lower()
+        if mode in {"fixed", "fixed_contracts"}:
+            return max(1, int(self.config["fixed_contracts"]))
+
+        # 本金模式：按可担保名义金额估算可卖 Put 张数，不做复利。
+        multiplier = int(contract.get("Multiplier", 0) or 0)
+        strike = float(contract.get("Strike", spot_price) or spot_price)
+        if multiplier <= 0 or strike <= 0:
+            return max(1, int(self.config["fixed_contracts"]))
+
+        principal = float(self.config.get("initial_capital", 0.0))
+        qty = int(principal // (strike * multiplier))
+        return max(0, qty)
+
+    def _resolve_call_qty(self, max_cover_qty: int) -> int:
+        max_cover_qty = int(max_cover_qty)
+        if max_cover_qty <= 0:
+            return 0
+
+        mode = str(self.config.get("contract_sizing", "capital")).strip().lower()
+        if mode in {"fixed", "fixed_contracts"}:
+            return min(max(1, int(self.config["fixed_contracts"])), max_cover_qty)
+
+        # capital 模式下默认 100% covered call。
+        return max_cover_qty
 
     def _try_open_short_option(
         self,
@@ -333,6 +393,7 @@ class WheelBacktestEngine:
 
         if leg.option_type == "Put":
             if spot < leg.strike:
+                # Put ITM：按执行价接货 ETF，状态切到持有ETF并准备卖Call。
                 etf_qty = abs(leg.qty_contracts) * int(leg.multiplier)
                 bps = float(self.config["cost_etf_slippage_bps"]) / 10000.0
                 exec_price = float(leg.strike) * (1.0 + max(0.0, bps))
@@ -347,54 +408,17 @@ class WheelBacktestEngine:
 
                 slippage_cash = max(0.0, (exec_price - float(leg.strike)) * int(etf_qty))
 
-                self._append_order(
-                    ts_signal=ts,
-                    ts_fill=ts,
-                    symbol=self.state.etf_symbol,
-                    asset_type="ETF",
-                    option_type=None,
-                    side="BUY",
-                    effect="ASSIGN_PUT",
-                    qty=int(etf_qty),
-                    price=exec_price,
-                    notional=notional,
-                    fee=fee,
-                    slippage=slippage_cash,
-                    cash_flow=cash_flow,
-                    status="filled",
-                    reason="ASSIGN_AT_EXPIRY",
-                    cycle_id=cycle_id,
-                    cycle_closed=False,
-                )
-
                 self.state.option_leg = None
                 self.state.state = STATE_LONG_ETF_SHORT_CALL
             else:
-                self._append_order(
-                    ts_signal=ts,
-                    ts_fill=ts,
-                    symbol=leg.symbol,
-                    asset_type="OPTION",
-                    option_type=leg.option_type,
-                    side="BUY",
-                    effect="EXPIRE_PUT",
-                    qty=abs(leg.qty_contracts),
-                    price=0.0,
-                    notional=0.0,
-                    fee=0.0,
-                    slippage=0.0,
-                    cash_flow=0.0,
-                    status="filled",
-                    reason="EXPIRE_WORTHLESS",
-                    cycle_id=cycle_id,
-                    cycle_closed=True,
-                )
+                # Put OTM：期权作废，cycle 结束回到 FLAT。
                 self.state.option_leg = None
                 self.state.state = STATE_FLAT
                 self.state.close_cycle()
 
         elif leg.option_type == "Call":
             if spot > leg.strike and self.state.etf_qty > 0:
+                # Call ITM：被行权卖出现货；若卖完则 cycle 结束。
                 deliver_qty = min(self.state.etf_qty, abs(leg.qty_contracts) * int(leg.multiplier))
                 bps = float(self.config["cost_etf_slippage_bps"]) / 10000.0
                 exec_price = float(leg.strike) * (1.0 - max(0.0, bps))
@@ -409,26 +433,6 @@ class WheelBacktestEngine:
 
                 cycle_closed = self.state.etf_qty == 0
                 slippage_cash = max(0.0, (float(leg.strike) - exec_price) * int(deliver_qty))
-                self._append_order(
-                    ts_signal=ts,
-                    ts_fill=ts,
-                    symbol=self.state.etf_symbol,
-                    asset_type="ETF",
-                    option_type=None,
-                    side="SELL",
-                    effect="CALL_AWAY",
-                    qty=int(deliver_qty),
-                    price=exec_price,
-                    notional=notional,
-                    fee=fee,
-                    slippage=slippage_cash,
-                    cash_flow=cash_flow,
-                    status="filled",
-                    reason="ASSIGN_AT_EXPIRY",
-                    cycle_id=cycle_id,
-                    cycle_closed=cycle_closed,
-                )
-
                 self.state.option_leg = None
                 if self.state.etf_qty == 0:
                     self.state.state = STATE_FLAT
@@ -436,28 +440,11 @@ class WheelBacktestEngine:
                 else:
                     self.state.state = STATE_LONG_ETF_SHORT_CALL
             else:
-                self._append_order(
-                    ts_signal=ts,
-                    ts_fill=ts,
-                    symbol=leg.symbol,
-                    asset_type="OPTION",
-                    option_type=leg.option_type,
-                    side="BUY",
-                    effect="EXPIRE_CALL",
-                    qty=abs(leg.qty_contracts),
-                    price=0.0,
-                    notional=0.0,
-                    fee=0.0,
-                    slippage=0.0,
-                    cash_flow=0.0,
-                    status="filled",
-                    reason="EXPIRE_WORTHLESS",
-                    cycle_id=cycle_id,
-                    cycle_closed=False,
-                )
+                # Call OTM：期权作废，继续持有 ETF，等待下一次卖 Call。
                 self.state.option_leg = None
                 self.state.state = STATE_LONG_ETF_SHORT_CALL
 
+        # 到期结算不记 order，只更新仓位与账本快照。
         self._record_position(ts, snapshot_type="event", etf_mark_override=spot)
 
     def _record_daily_snapshot(self, trade_date, eod_row: pd.Series) -> None:
@@ -597,6 +584,22 @@ class WheelBacktestEngine:
         self._order_seq += 1
 
 
+def _derive_option_code_from_etf_symbol(etf_symbol: str) -> str:
+    # 渚嬪 S.CN.SZSE.159915 -> 159915
+    text = str(etf_symbol or "").strip()
+    if not text:
+        return ""
+
+    parts = text.split(".")
+    if parts:
+        tail = parts[-1]
+        if re.fullmatch(r"\d{6,}", tail):
+            return tail
+
+    m = re.search(r"(\d{6,})", text)
+    return m.group(1) if m else ""
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     cfg = DEFAULT_CONFIG.copy()
 
@@ -622,7 +625,19 @@ def load_config(config_path: str) -> Dict[str, Any]:
     cfg["cost_option_slippage_ticks"] = float(cfg["cost_option_slippage_ticks"])
     cfg["cost_etf_fee_rate"] = float(cfg["cost_etf_fee_rate"])
     cfg["cost_etf_slippage_bps"] = float(cfg["cost_etf_slippage_bps"])
+    cfg["initial_capital"] = float(cfg.get("initial_capital", 1_000_000.0))
+    cfg["contract_sizing"] = str(cfg.get("contract_sizing", "capital"))
+    cfg["risk_free_rate"] = float(cfg.get("risk_free_rate", 0.0))
     cfg["use_disk_cache"] = bool(cfg.get("use_disk_cache", True))
+    cfg["entry_start_time"] = str(cfg.get("entry_start_time", "09:45:00"))
+    cfg["trade_start_offset_days"] = int(cfg.get("trade_start_offset_days", 1))
+    cfg["etf_symbol"] = str(cfg["etf_symbol"])
+
+    derived_code = _derive_option_code_from_etf_symbol(cfg["etf_symbol"])
+    fallback_code = str(cfg.get("option_code", "")).strip()
+    cfg["option_code"] = derived_code or fallback_code
+    if not cfg["option_code"]:
+        raise ValueError(f"Cannot derive option_code from etf_symbol: {cfg['etf_symbol']}")
 
     cache_dir = cfg.get("cache_dir")
     if cache_dir:
@@ -646,12 +661,18 @@ def run_backtest(config_path: str) -> Dict[str, Any]:
         output_dir = (config_dir / output_dir).resolve()
 
     save_results(output_dir, frames)
-    analysis = analyze(output_dir)
+    analysis = analyze(
+        output_dir,
+        initial_capital=float(cfg["initial_capital"]),
+        risk_free_rate=float(cfg.get("risk_free_rate", 0.0)),
+    )
 
     return {
         "orders": frames["orders"],
         "positions": frames["positions"],
         "daily_pnl": frames["daily_pnl"],
         "metrics": analysis["metrics"],
+        "analysis": {k: v for k, v in analysis.items() if k != "metrics"},
         "artifacts_path": str(output_dir),
     }
+

@@ -11,7 +11,7 @@ import pandas as pd
 class ContractSelector:
     put_offset_abs: float
     call_offset_abs: float
-    expiry_rule: str = "next_month_2nd"
+    expiry_rule: str = "near_month"
 
     def select_put_contract(self, chain: pd.DataFrame, trade_date: date, spot_price: float) -> Optional[Dict[str, Any]]:
         expiry = self._select_expiry(chain, trade_date)
@@ -53,7 +53,8 @@ class ContractSelector:
         if not expiries:
             return None
 
-        if self.expiry_rule == "next_month_2nd" and len(expiries) >= 2:
+        rule = str(self.expiry_rule).strip().lower()
+        if rule in {"next_month_2nd", "second_near_month"} and len(expiries) >= 2:
             return expiries[1]
 
         return expiries[0]

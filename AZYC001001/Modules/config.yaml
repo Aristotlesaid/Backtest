@@ -1,23 +1,39 @@
-strategy_id: AZYC001001
-etf_symbol: S.CN.SZSE.159915
-option_code: "159915"
-start_date: "2025-01-01"
+﻿# 绛栫暐缂栧彿锛堢敤浜庤緭鍑轰笌鏍囪瘑锛?strategy_id: AZYC001001
+
+# ETF 鏍囩殑浠ｇ爜锛坥ption_code 浼氳嚜鍔ㄤ粠杩欓噷鎻愬彇锛屽 159915锛?etf_symbol: S.CN.SZSE.159915
+
+# 鍥炴祴璧锋鏃ユ湡锛堝惈棣栧熬锛?start_date: "2023-01-01"
 end_date: "2025-12-31"
-frequency: minute1
 
-fixed_contracts: 1
-put_offset_abs: 0.2
-call_offset_abs: 0.2
-expiry_rule: next_month_2nd
+# 琛屾儏棰戠巼锛堝綋鍓嶆敮鎸?minute1锛?frequency: minute1
 
-min_volume_signal: 20
-min_volume_fill: 20
+# Put 鐩爣鎵ц浠峰亸绉伙紙鐩爣=鐜颁环-鍋忕Щ锛?put_offset_abs: 0.15
+# Call 鐩爣鎵ц浠峰亸绉伙紙鐩爣=鐜颁环+鍋忕Щ锛?call_offset_abs: 0.05
+# 鍒版湡閫夋嫨瑙勫垯锛歯ear_month=杩戞湀锛宯ext_month_2nd=娆¤繎鏈?expiry_rule: near_month
 
-cost_option_fee_per_contract: 0.0
-cost_option_slippage_ticks: 0.0
+# 淇″彿 bar 鏈€灏忔垚浜ら噺杩囨护
+min_volume_signal: 10
+# 鎴愪氦 bar 鏈€灏忔垚浜ら噺杩囨护
+min_volume_fill: 10
+
+# 鏈熸潈鍗曞紶鎵嬬画璐?cost_option_fee_per_contract: 0.0
+# 鏈熸潈婊戠偣锛坱ick锛?cost_option_slippage_ticks: 0.0
+# ETF 鎵嬬画璐圭巼
 cost_etf_fee_rate: 0.0
-cost_etf_slippage_bps: 0.0
-use_disk_cache: true
-cache_dir: ../cache
+# ETF 婊戠偣锛坆ps锛?cost_etf_slippage_bps: 0.0
 
-output_dir: ../outputs
+# 鍥哄畾鏈噾锛堜笉澶嶅埄锛夛紝鐢ㄤ簬 capital 妯″紡瀹氫粨
+initial_capital: 1000000.0
+# 瀹氫粨妯″紡锛歝apital=鎸夋湰閲戯紝fixed=鎸夊浐瀹氬紶鏁?contract_sizing: capital
+# 鏃犻闄╁埄鐜囷紙鐢ㄤ簬澶忔櫘绛夋寚鏍囷級
+risk_free_rate: 0.0
+
+# 鏄惁鍚敤鏈湴缂撳瓨
+use_disk_cache: true
+# 鍏变韩缂撳瓨鐩綍锛堣法绛栫暐澶嶇敤锛?cache_dir: ../../DataCache
+
+# 鏃ュ唴浠庤鏃堕棿寮€濮嬫壂鎻忔柊寮€浠?entry_start_time: "09:30:00"
+# 浠呭鈥滃洖娴嬭捣濮嬮樁娈碘€濈敓鏁堬細璧峰鏃ュ悗寤惰繜鍑犲ぉ鎵嶅厑璁搁娆″紑浠擄紙0=璧峰鏃ュ嵆鍙紑锛?trade_start_offset_days: 0
+
+# 杈撳嚭鐩綍锛堢浉瀵?config 鏂囦欢锛?output_dir: ../outputs
+
