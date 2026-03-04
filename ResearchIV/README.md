@@ -6,6 +6,9 @@
 - 对每份合约（Call/Put 分开）动态计算：`IV, Delta, Gamma, Theta, Vega`
 - 同步叠加标的波动率：`HV30, HV60`
 - 新增日内 IV 板块：每个合约一张图，观察从起始日到到期前的分钟级 IV 走势，并叠加 HV30/HV60
+- 新增选约模式参数：
+  - `selection_mode="near_next"`：沿用输入日近月+次近月
+  - `selection_mode="expired_lifecycle"`：回看最近已到期月份，支持 `lifecycle_start_month_offsets=[3,6]` 这类生命周期窗口
 - 计算后写入缓存，后续同参数优先读取缓存
 
 主入口 Notebook：`ResearchIV_main.ipynb`
@@ -20,6 +23,10 @@ res = notebook_show_term_atm_greeks(
     etf_symbol="S.CN.SZSE.159915",
     lookback_days=240,
     trade_date_align="backward",
+    selection_mode="expired_lifecycle",
+    strikes_per_term=4,
+    lifecycle_start_month_offsets=[3, 6],
+    lifecycle_anchor_expiry=None,
     include_intraday_iv=True,
 )
 ```
@@ -41,6 +48,10 @@ res = build_term_atm_greeks_hv_snapshot(
     etf_symbol="S.CN.SZSE.159915",
     lookback_days=240,
     trade_date_align="backward",
+    selection_mode="expired_lifecycle",
+    strikes_per_term=4,
+    lifecycle_start_month_offsets=[3, 6],
+    lifecycle_anchor_expiry=None,
     include_intraday_iv=True,
     risk_free_rate=0.015,
     dividend_yield=0.0,

@@ -120,7 +120,12 @@ def _resolve_trade_date(
     return pd.Timestamp(row["trade_date"]), float(row["CLOSE"])
 
 
-def _select_two_terms_four_strikes(chain: pd.DataFrame, trade_date: pd.Timestamp, spot: float) -> List[Dict[str, Any]]:
+def _select_two_terms_four_strikes(
+    chain: pd.DataFrame,
+    trade_date: pd.Timestamp,
+    spot: float,
+    strike_count: int = 4,
+) -> List[Dict[str, Any]]:
     if chain.empty:
         return []
 
@@ -151,7 +156,7 @@ def _select_two_terms_four_strikes(chain: pd.DataFrame, trade_date: pd.Timestamp
         if not common:
             continue
 
-        strike_bucket = common[:4]
+        strike_bucket = common[: int(strike_count)]
         term_contracts: List[Dict[str, Any]] = []
         for strike in strike_bucket:
             call_row = calls[calls["Strike"] == strike].sort_values("Symbol").iloc[0]
@@ -171,10 +176,145 @@ def _select_two_terms_four_strikes(chain: pd.DataFrame, trade_date: pd.Timestamp
                 "term": "near" if idx == 1 else "next",
                 "term_label": label,
                 "expiry": pd.Timestamp(expiry),
+                "start_date": pd.Timestamp(trade_date).normalize(),
                 "contracts": term_contracts,
             }
         )
     return output
+
+
+def _select_fixed_expiry_strikes(
+    chain: pd.DataFrame,
+    target_expiry: pd.Timestamp,
+    spot: float,
+    strike_count: int,
+) -> List[Dict[str, Any]]:
+    if chain.empty:
+        return []
+
+    table = chain.copy()
+    table["EndDate"] = pd.to_datetime(table["EndDate"], errors="coerce").dt.normalize()
+    table["Strike"] = pd.to_numeric(table["Strike"], errors="coerce")
+    table["OptType"] = table["OptType"].astype(str).str.lower()
+    table = table.dropna(subset=["EndDate", "Strike", "OptType", "Symbol"])
+    table = table[table["EndDate"] == pd.Timestamp(target_expiry).normalize()].copy()
+    if table.empty:
+        return []
+
+    calls = table[table["OptType"].str.contains("call")]
+    puts = table[table["OptType"].str.contains("put")]
+    if calls.empty or puts.empty:
+        return []
+
+    call_strikes = set(calls["Strike"].tolist())
+    put_strikes = set(puts["Strike"].tolist())
+    common = sorted(call_strikes.intersection(put_strikes), key=lambda k: (abs(float(k) - spot), float(k)))
+    if not common:
+        return []
+
+    contracts: List[Dict[str, Any]] = []
+    for strike in common[: int(strike_count)]:
+        call_row = calls[calls["Strike"] == strike].sort_values("Symbol").iloc[0]
+        put_row = puts[puts["Strike"] == strike].sort_values("Symbol").iloc[0]
+        contracts.append(
+            {
+                "strike": float(strike),
+                "call_symbol": str(call_row["Symbol"]),
+                "put_symbol": str(put_row["Symbol"]),
+            }
+        )
+    return contracts
+
+
+def _find_latest_expired_expiry(
+    *,
+    trade_date: pd.Timestamp,
+    option_code: str,
+    scan_days: int,
+) -> pd.Timestamp:
+    scan_end = pd.Timestamp(trade_date).normalize()
+    scan_start = (scan_end - pd.Timedelta(days=int(scan_days))).normalize()
+    loader = CausisDataLoader(
+        start_date=scan_start.strftime("%Y-%m-%d"),
+        end_date=scan_end.strftime("%Y-%m-%d"),
+        frequency="day",
+        option_code=option_code,
+        use_disk_cache=True,
+    )
+
+    for shift in range(1, int(scan_days) + 1):
+        day = (scan_end - pd.Timedelta(days=shift)).normalize()
+        chain = loader.load_option_chain(day.date())
+        if chain.empty:
+            continue
+        expiries = pd.to_datetime(chain.get("EndDate"), errors="coerce").dropna().dt.normalize()
+        expiries = expiries[expiries < scan_end]
+        if expiries.empty:
+            continue
+        return pd.Timestamp(expiries.max()).normalize()
+
+    raise ValueError(f"No expired option expiry found within {scan_days} days before {scan_end.date()}.")
+
+
+def _select_expired_lifecycle_terms(
+    *,
+    etf_symbol: str,
+    option_code: str,
+    trade_date: pd.Timestamp,
+    anchor_expiry: Optional[str],
+    start_month_offsets: List[int],
+    strike_count: int,
+    scan_days: int,
+) -> List[Dict[str, Any]]:
+    if anchor_expiry:
+        expiry = pd.Timestamp(anchor_expiry).normalize()
+        if expiry >= trade_date:
+            raise ValueError("anchor_expiry must be earlier than trade_date in expired_lifecycle mode.")
+    else:
+        expiry = _find_latest_expired_expiry(
+            trade_date=trade_date,
+            option_code=option_code,
+            scan_days=int(scan_days),
+        )
+
+    terms: List[Dict[str, Any]] = []
+    for months in start_month_offsets:
+        month_anchor = (pd.Timestamp(year=expiry.year, month=expiry.month, day=1) - pd.DateOffset(months=int(months))).normalize()
+        start_trade_date, start_spot = _resolve_trade_date(
+            input_date=month_anchor.strftime("%Y-%m-%d"),
+            etf_symbol=etf_symbol,
+            option_code=option_code,
+            align="forward",
+        )
+        chain_loader = CausisDataLoader(
+            start_date=start_trade_date.strftime("%Y-%m-%d"),
+            end_date=start_trade_date.strftime("%Y-%m-%d"),
+            frequency="day",
+            option_code=option_code,
+            use_disk_cache=True,
+        )
+        chain = chain_loader.load_option_chain(start_trade_date.date())
+        contracts = _select_fixed_expiry_strikes(
+            chain=chain,
+            target_expiry=expiry,
+            spot=float(start_spot),
+            strike_count=int(strike_count),
+        )
+        if not contracts:
+            continue
+        terms.append(
+            {
+                "term": f"life_{int(months)}m",
+                "term_label": f"Lifecycle_{int(months)}M_Expiry_{expiry.strftime('%Y-%m-%d')}",
+                "expiry": expiry,
+                "start_date": pd.Timestamp(start_trade_date).normalize(),
+                "contracts": contracts,
+            }
+        )
+
+    if not terms:
+        raise ValueError("No lifecycle contracts selected. Try adjusting start_month_offsets or strike_count.")
+    return terms
 
 
 def _build_spot_and_hv(etf_bars: pd.DataFrame) -> tuple[pd.Series, pd.DataFrame]:
@@ -216,6 +356,10 @@ def _expand_selected_contracts(selected_contracts: pd.DataFrame) -> pd.DataFrame
 
     table = selected_contracts.copy()
     table["expiry"] = pd.to_datetime(table["expiry"], errors="coerce").dt.normalize()
+    if "start_date" in table.columns:
+        table["start_date"] = pd.to_datetime(table["start_date"], errors="coerce").dt.normalize()
+    else:
+        table["start_date"] = pd.NaT
     table["strike"] = pd.to_numeric(table["strike"], errors="coerce")
     table = table.dropna(subset=["expiry", "strike", "call_symbol", "put_symbol"])
 
@@ -227,6 +371,7 @@ def _expand_selected_contracts(selected_contracts: pd.DataFrame) -> pd.DataFrame
                 {
                     "term": str(row.term),
                     "expiry": pd.Timestamp(row.expiry),
+                    "start_date": pd.Timestamp(row.start_date).normalize() if pd.notna(row.start_date) else pd.NaT,
                     "strike": strike,
                     "side": side,
                     "symbol": symbol,
@@ -241,6 +386,7 @@ def _compute_greeks_panel(
     etf_symbol: str,
     trade_date: pd.Timestamp,
     terms: List[Dict[str, Any]],
+    panel_end_date: pd.Timestamp,
     risk_free_rate: float,
     dividend_yield: float,
     min_option_price: float,
@@ -251,6 +397,8 @@ def _compute_greeks_panel(
     rows: List[Dict[str, Any]] = []
     for term in terms:
         expiry = pd.Timestamp(term["expiry"]).normalize()
+        start_date = pd.Timestamp(term.get("start_date", trade_date)).normalize()
+        end_date = min(pd.Timestamp(panel_end_date).normalize(), expiry)
         for item in term["contracts"]:
             strike = float(item["strike"])
             symbol_map = {
@@ -263,7 +411,9 @@ def _compute_greeks_panel(
 
                 for dt, option_price in close_map.items():
                     date = pd.Timestamp(dt).normalize()
-                    if date > trade_date:
+                    if date < start_date:
+                        continue
+                    if date > end_date:
                         continue
                     if date not in spot_map.index:
                         continue
@@ -349,7 +499,8 @@ def _compute_greeks_panel(
 def _compute_intraday_iv_panel(
     *,
     selected_contracts: pd.DataFrame,
-    trade_date: pd.Timestamp,
+    panel_start_date: pd.Timestamp,
+    panel_end_date: pd.Timestamp,
     etf_symbol: str,
     option_code: str,
     lookback_days: int,
@@ -362,19 +513,20 @@ def _compute_intraday_iv_panel(
         return pd.DataFrame()
 
     max_expiry = contracts["expiry"].max().normalize()
-    intraday_end = min(max_expiry, pd.Timestamp.now().normalize())
-    if intraday_end < trade_date:
+    intraday_start = pd.Timestamp(panel_start_date).normalize()
+    intraday_end = min(max_expiry, pd.Timestamp(panel_end_date).normalize(), pd.Timestamp.now().normalize())
+    if intraday_end < intraday_start:
         return pd.DataFrame()
 
     minute_loader = CausisDataLoader(
-        start_date=trade_date.strftime("%Y-%m-%d"),
+        start_date=intraday_start.strftime("%Y-%m-%d"),
         end_date=intraday_end.strftime("%Y-%m-%d"),
         frequency="minute1",
         option_code=option_code,
         use_disk_cache=True,
     )
     daily_loader = CausisDataLoader(
-        start_date=(trade_date - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d"),
+        start_date=(intraday_start - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d"),
         end_date=intraday_end.strftime("%Y-%m-%d"),
         frequency="day",
         option_code=option_code,
@@ -399,7 +551,9 @@ def _compute_intraday_iv_panel(
         side = str(contract.side)
         strike = float(contract.strike)
         expiry = pd.Timestamp(contract.expiry).normalize()
+        contract_start = pd.Timestamp(contract.start_date).normalize() if pd.notna(contract.start_date) else intraday_start
         expiry_ts = expiry + pd.Timedelta(hours=15)
+        contract_end_ts = min(expiry_ts, intraday_end + pd.Timedelta(hours=23, minutes=59, seconds=59))
 
         option_bars = minute_loader.load_option_bars(symbol)
         option_minute = _build_minute_close_frame(option_bars)
@@ -407,7 +561,7 @@ def _compute_intraday_iv_panel(
             continue
 
         option_minute = option_minute[
-            (option_minute["timestamp"] >= trade_date) & (option_minute["timestamp"] < expiry_ts)
+            (option_minute["timestamp"] >= contract_start) & (option_minute["timestamp"] <= contract_end_ts)
         ].copy()
         if option_minute.empty:
             continue
@@ -792,10 +946,45 @@ def _materialize_outputs(
     }
 
 
+def _build_selected_contracts(trade_date: pd.Timestamp, terms: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for term in terms:
+        expiry = pd.Timestamp(term["expiry"]).normalize()
+        start_date = pd.Timestamp(term.get("start_date", trade_date)).normalize()
+        for c in term["contracts"]:
+            rows.append(
+                {
+                    "term": str(term["term"]),
+                    "term_label": str(term["term_label"]),
+                    "trade_date": trade_date.strftime("%Y-%m-%d"),
+                    "start_date": start_date.strftime("%Y-%m-%d"),
+                    "expiry": expiry.strftime("%Y-%m-%d"),
+                    "strike": float(c["strike"]),
+                    "call_symbol": str(c["call_symbol"]),
+                    "put_symbol": str(c["put_symbol"]),
+                }
+            )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["term", "expiry", "strike"]).reset_index(drop=True)
+
+
+def _normalize_start_month_offsets(start_month_offsets: Optional[List[int]]) -> List[int]:
+    if start_month_offsets is None:
+        return [3, 6]
+    values = [int(x) for x in start_month_offsets]
+    values = [v for v in values if v > 0]
+    values = sorted(set(values))
+    if not values:
+        raise ValueError("lifecycle_start_month_offsets must contain positive integers.")
+    return values
+
+
 def _build_cache_payload(
     *,
     input_date: str,
     trade_date: pd.Timestamp,
+    selection_mode: str,
     etf_symbol: str,
     option_code: str,
     lookback_days: int,
@@ -803,22 +992,32 @@ def _build_cache_payload(
     dividend_yield: float,
     min_option_price: float,
     trade_date_align: str,
+    strikes_per_term: int,
+    lifecycle_start_month_offsets: List[int],
+    lifecycle_anchor_expiry: Optional[str],
     intraday_end_date: str,
     selected_contracts: pd.DataFrame,
 ) -> Dict[str, Any]:
-    contract_records = (
-        selected_contracts[["term", "expiry", "strike", "call_symbol", "put_symbol"]]
-        .sort_values(["term", "expiry", "strike", "call_symbol", "put_symbol"])
-        .to_dict(orient="records")
-    )
+    if selected_contracts.empty:
+        contract_records: List[Dict[str, Any]] = []
+    else:
+        contract_records = (
+            selected_contracts.copy()
+            .sort_values(["term", "expiry", "strike", "call_symbol", "put_symbol"])
+            .to_dict(orient="records")
+        )
     return {
-        "engine": "term_atm_greeks_hv_v2",
+        "engine": "term_atm_greeks_hv_v3",
         "input_date": str(input_date),
         "trade_date": trade_date.strftime("%Y-%m-%d"),
+        "selection_mode": str(selection_mode),
         "trade_date_align": str(trade_date_align),
         "etf_symbol": str(etf_symbol),
         "option_code": str(option_code),
         "lookback_days": int(lookback_days),
+        "strikes_per_term": int(strikes_per_term),
+        "lifecycle_start_month_offsets": [int(x) for x in lifecycle_start_month_offsets],
+        "lifecycle_anchor_expiry": str(lifecycle_anchor_expiry) if lifecycle_anchor_expiry else "",
         "risk_free_rate": float(risk_free_rate),
         "dividend_yield": float(dividend_yield),
         "min_option_price": float(min_option_price),
@@ -835,6 +1034,11 @@ def build_term_atm_greeks_hv_snapshot(
     lookback_days: int = 240,
     hv_window: Optional[int] = None,
     trade_date_align: str = "backward",
+    selection_mode: str = "expired_lifecycle",
+    strikes_per_term: int = 4,
+    lifecycle_start_month_offsets: Optional[List[int]] = None,
+    lifecycle_anchor_expiry: Optional[str] = None,
+    lifecycle_scan_days: int = 180,
     include_intraday_iv: bool = True,
     risk_free_rate: float = 0.015,
     dividend_yield: float = 0.0,
@@ -854,45 +1058,54 @@ def build_term_atm_greeks_hv_snapshot(
         align=trade_date_align,
     )
 
-    hist_start = (trade_date - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d")
-    hist_end = trade_date.strftime("%Y-%m-%d")
+    mode = str(selection_mode or "expired_lifecycle").strip().lower()
+    lifecycle_offsets = _normalize_start_month_offsets(lifecycle_start_month_offsets)
 
-    loader = CausisDataLoader(
-        start_date=hist_start,
-        end_date=hist_end,
-        frequency="day",
-        option_code=option_code,
-        use_disk_cache=True,
-    )
+    if mode == "near_next":
+        chain_loader = CausisDataLoader(
+            start_date=trade_date.strftime("%Y-%m-%d"),
+            end_date=trade_date.strftime("%Y-%m-%d"),
+            frequency="day",
+            option_code=option_code,
+            use_disk_cache=True,
+        )
+        chain = chain_loader.load_option_chain(trade_date.date())
+        terms = _select_two_terms_four_strikes(
+            chain=chain,
+            trade_date=trade_date,
+            spot=trade_spot,
+            strike_count=int(strikes_per_term),
+        )
+        if len(terms) == 0:
+            raise ValueError(f"No valid near/next month ATM strikes found on {trade_date.date()}")
+        panel_start_date = (trade_date - timedelta(days=int(lookback_days))).normalize()
+        panel_end_date = trade_date.normalize()
+        anchor_expiry_value = ""
+    elif mode == "expired_lifecycle":
+        terms = _select_expired_lifecycle_terms(
+            etf_symbol=etf_symbol,
+            option_code=option_code,
+            trade_date=trade_date,
+            anchor_expiry=lifecycle_anchor_expiry,
+            start_month_offsets=lifecycle_offsets,
+            strike_count=int(strikes_per_term),
+            scan_days=int(lifecycle_scan_days),
+        )
+        panel_start_date = min(pd.Timestamp(t["start_date"]).normalize() for t in terms)
+        panel_end_date = max(pd.Timestamp(t["expiry"]).normalize() for t in terms)
+        anchor_expiry_value = max(pd.Timestamp(t["expiry"]).normalize() for t in terms).strftime("%Y-%m-%d")
+    else:
+        raise ValueError("selection_mode must be 'expired_lifecycle' or 'near_next'.")
 
-    chain = loader.load_option_chain(trade_date.date())
-    terms = _select_two_terms_four_strikes(chain=chain, trade_date=trade_date, spot=trade_spot)
-    if len(terms) == 0:
-        raise ValueError(f"No valid near/next month ATM strikes found on {trade_date.date()}")
+    selected_contracts = _build_selected_contracts(trade_date=trade_date, terms=terms)
+    if selected_contracts.empty:
+        raise ValueError("No selected contracts were generated.")
 
-    contract_rows: List[Dict[str, Any]] = []
-    for term in terms:
-        expiry = pd.Timestamp(term["expiry"])
-        for c in term["contracts"]:
-            contract_rows.append(
-                {
-                    "term": str(term["term"]),
-                    "trade_date": trade_date.strftime("%Y-%m-%d"),
-                    "expiry": expiry.strftime("%Y-%m-%d"),
-                    "strike": float(c["strike"]),
-                    "call_symbol": str(c["call_symbol"]),
-                    "put_symbol": str(c["put_symbol"]),
-                }
-            )
-    selected_contracts = pd.DataFrame(contract_rows).sort_values(["term", "expiry", "strike"]).reset_index(drop=True)
-
-    intraday_end = min(
-        pd.to_datetime(selected_contracts["expiry"], errors="coerce").dropna().max().normalize(),
-        pd.Timestamp.now().normalize(),
-    )
+    intraday_end = min(pd.Timestamp(panel_end_date).normalize(), pd.Timestamp.now().normalize())
     cache_payload = _build_cache_payload(
         input_date=input_date,
         trade_date=trade_date,
+        selection_mode=mode,
         etf_symbol=etf_symbol,
         option_code=option_code,
         lookback_days=int(lookback_days),
@@ -900,6 +1113,9 @@ def build_term_atm_greeks_hv_snapshot(
         dividend_yield=float(dividend_yield),
         min_option_price=float(min_option_price),
         trade_date_align=str(trade_date_align),
+        strikes_per_term=int(strikes_per_term),
+        lifecycle_start_month_offsets=lifecycle_offsets,
+        lifecycle_anchor_expiry=anchor_expiry_value,
         intraday_end_date=intraday_end.strftime("%Y-%m-%d"),
         selected_contracts=selected_contracts,
     )
@@ -923,11 +1139,19 @@ def build_term_atm_greeks_hv_snapshot(
         intraday_iv_panel = pd.DataFrame()
 
     if not daily_from_cache:
+        daily_loader = CausisDataLoader(
+            start_date=(pd.Timestamp(panel_start_date).normalize() - timedelta(days=int(lookback_days))).strftime("%Y-%m-%d"),
+            end_date=pd.Timestamp(panel_end_date).normalize().strftime("%Y-%m-%d"),
+            frequency="day",
+            option_code=option_code,
+            use_disk_cache=True,
+        )
         greeks_panel = _compute_greeks_panel(
-            loader=loader,
+            loader=daily_loader,
             etf_symbol=etf_symbol,
             trade_date=trade_date,
             terms=terms,
+            panel_end_date=pd.Timestamp(panel_end_date).normalize(),
             risk_free_rate=float(risk_free_rate),
             dividend_yield=float(dividend_yield),
             min_option_price=float(min_option_price),
@@ -940,7 +1164,8 @@ def build_term_atm_greeks_hv_snapshot(
         if not intraday_from_cache:
             intraday_iv_panel = _compute_intraday_iv_panel(
                 selected_contracts=selected_contracts,
-                trade_date=trade_date,
+                panel_start_date=pd.Timestamp(panel_start_date).normalize(),
+                panel_end_date=pd.Timestamp(panel_end_date).normalize(),
                 etf_symbol=etf_symbol,
                 option_code=option_code,
                 lookback_days=int(lookback_days),
@@ -959,6 +1184,10 @@ def build_term_atm_greeks_hv_snapshot(
         "input_date": str(input_date),
         "trade_date": trade_date.strftime("%Y-%m-%d"),
         "trade_date_align": str(trade_date_align),
+        "selection_mode": mode,
+        "strikes_per_term": int(strikes_per_term),
+        "lifecycle_start_month_offsets": [int(x) for x in lifecycle_offsets],
+        "lifecycle_anchor_expiry": anchor_expiry_value,
         "trade_spot": float(trade_spot),
         "etf_symbol": str(etf_symbol),
         "option_code": str(option_code),
@@ -996,6 +1225,10 @@ def build_term_atm_greeks_hv_snapshot(
         "input_date": str(input_date),
         "trade_date": trade_date.strftime("%Y-%m-%d"),
         "trade_date_align": str(trade_date_align),
+        "selection_mode": mode,
+        "strikes_per_term": int(strikes_per_term),
+        "lifecycle_start_month_offsets": [int(x) for x in lifecycle_offsets],
+        "lifecycle_anchor_expiry": anchor_expiry_value,
         "trade_spot": float(trade_spot),
         "etf_symbol": str(etf_symbol),
         "option_code": str(option_code),
@@ -1023,6 +1256,8 @@ def notebook_show_term_atm_greeks(**kwargs) -> Dict[str, Any]:
         print("input_date:", result["input_date"])
         print("trade_date:", result["trade_date"])
         print("trade_date_align:", result["trade_date_align"])
+        print("selection_mode:", result["selection_mode"])
+        print("lifecycle_anchor_expiry:", result.get("lifecycle_anchor_expiry", ""))
         print("from_cache:", result["from_cache"])
         print("daily_from_cache:", result["daily_from_cache"])
         print("intraday_from_cache:", result["intraday_from_cache"])
