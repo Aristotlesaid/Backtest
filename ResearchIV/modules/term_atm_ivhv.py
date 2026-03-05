@@ -956,12 +956,13 @@ def _plot_overview(term_frames: Dict[str, pd.DataFrame], out_path: Path, title: 
     plt.close(fig)
 
 
-def _plot_intraday_contract(frame: pd.DataFrame, out_path: Path, title: str) -> None:
+def _plot_intraday_contract_one_day(frame: pd.DataFrame, out_path: Path, title: str) -> None:
     if frame.empty:
         return
 
     panel = frame.copy()
     panel["timestamp"] = pd.to_datetime(panel["timestamp"], errors="coerce")
+    panel["date"] = pd.to_datetime(panel["date"], errors="coerce").dt.normalize()
     panel = panel.dropna(subset=["timestamp", "IV"]).sort_values("timestamp")
     if panel.empty:
         return
@@ -969,16 +970,12 @@ def _plot_intraday_contract(frame: pd.DataFrame, out_path: Path, title: str) -> 
     fig, ax = plt.subplots(figsize=(16, 5))
     ax.plot(panel["timestamp"], panel["IV"], linewidth=0.8, color="#1f77b4", label="Intraday IV")
 
-    hv_daily = (
-        panel[["date", "HV30", "HV60"]]
-        .drop_duplicates(subset=["date"], keep="last")
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
-    if not hv_daily.empty:
-        hv_x = pd.to_datetime(hv_daily["date"], errors="coerce") + pd.Timedelta(hours=11, minutes=30)
-        ax.step(hv_x, hv_daily["HV30"], where="post", linestyle="--", linewidth=1.2, color="#ff7f0e", label="HV30")
-        ax.step(hv_x, hv_daily["HV60"], where="post", linestyle=":", linewidth=1.2, color="#2ca02c", label="HV60")
+    hv30 = float(panel["HV30"].dropna().iloc[-1]) if panel["HV30"].notna().any() else np.nan
+    hv60 = float(panel["HV60"].dropna().iloc[-1]) if panel["HV60"].notna().any() else np.nan
+    if pd.notna(hv30):
+        ax.axhline(hv30, linestyle="--", linewidth=1.2, color="#ff7f0e", label="HV30")
+    if pd.notna(hv60):
+        ax.axhline(hv60, linestyle=":", linewidth=1.2, color="#2ca02c", label="HV60")
 
     ax.set_title(title)
     ax.set_ylabel("Vol")
@@ -1038,6 +1035,8 @@ def _materialize_outputs(
     intraday_panel_parquet_path = ""
     intraday_contract_csv_paths: List[str] = []
     intraday_contract_plot_paths: List[str] = []
+    intraday_contract_daily_csv_paths: List[str] = []
+    intraday_contract_daily_plot_paths: List[str] = []
 
     if intraday_iv_panel is not None and not intraday_iv_panel.empty:
         intraday_dir.mkdir(parents=True, exist_ok=True)
@@ -1056,14 +1055,30 @@ def _materialize_outputs(
             frame.to_csv(csv_path, index=False)
             intraday_contract_csv_paths.append(str(csv_path))
 
-            plot_path = intraday_dir / f"{safe_symbol}.png"
-            first = frame.sort_values("timestamp").iloc[0]
-            contract_title = (
-                f"{symbol_text} | {first['side']} | K={first['strike']} | "
-                f"TradeDate={trade_date.strftime('%Y-%m-%d')} | Expiry={pd.Timestamp(first['expiry']).strftime('%Y-%m-%d')}"
-            )
-            _plot_intraday_contract(frame=frame, out_path=plot_path, title=contract_title)
-            intraday_contract_plot_paths.append(str(plot_path))
+            per_symbol_dir = intraday_dir / safe_symbol
+            per_symbol_dir.mkdir(parents=True, exist_ok=True)
+            frame_local = frame.copy()
+            frame_local["date"] = pd.to_datetime(frame_local["date"], errors="coerce").dt.normalize()
+            for day, day_frame in frame_local.groupby("date", sort=True):
+                if pd.isna(day):
+                    continue
+                day_ts = pd.Timestamp(day).normalize()
+                day_tag = day_ts.strftime("%Y%m%d")
+
+                day_csv_path = per_symbol_dir / f"{day_tag}.csv"
+                day_frame.to_csv(day_csv_path, index=False)
+                intraday_contract_daily_csv_paths.append(str(day_csv_path))
+
+                day_plot_path = per_symbol_dir / f"{day_tag}.png"
+                first = day_frame.sort_values("timestamp").iloc[0]
+                contract_title = (
+                    f"{symbol_text} | {first['side']} | K={first['strike']} | "
+                    f"Date={day_ts.strftime('%Y-%m-%d')} | Expiry={pd.Timestamp(first['expiry']).strftime('%Y-%m-%d')}"
+                )
+                _plot_intraday_contract_one_day(frame=day_frame, out_path=day_plot_path, title=contract_title)
+                intraday_contract_daily_plot_paths.append(str(day_plot_path))
+
+        intraday_contract_plot_paths = list(intraday_contract_daily_plot_paths)
 
     return {
         "selected_contracts_path": str(selected_path),
@@ -1077,6 +1092,8 @@ def _materialize_outputs(
         "intraday_panel_parquet_path": intraday_panel_parquet_path,
         "intraday_contract_csv_paths": intraday_contract_csv_paths,
         "intraday_contract_plot_paths": intraday_contract_plot_paths,
+        "intraday_contract_daily_csv_paths": intraday_contract_daily_csv_paths,
+        "intraday_contract_daily_plot_paths": intraday_contract_daily_plot_paths,
     }
 
 
@@ -1428,7 +1445,12 @@ def notebook_show_term_atm_greeks(**kwargs) -> Dict[str, Any]:
         if overview.exists():
             display(Image(filename=str(overview)))
 
-        for path_text in result.get("intraday_contract_plot_paths", []):
+        intraday_plots = list(result.get("intraday_contract_plot_paths", []))
+        if intraday_plots:
+            print("intraday daily plot count:", len(intraday_plots))
+            intraday_plots = sorted(intraday_plots)[-12:]
+
+        for path_text in intraday_plots:
             p = Path(path_text)
             if p.exists():
                 display(Image(filename=str(p)))

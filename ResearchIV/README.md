@@ -5,7 +5,7 @@
 - 选出当日近月、次近月各 4 档最接近平值执行价
 - 对每份合约（Call/Put 分开）动态计算：`IV, Delta, Gamma, Theta, Vega`
 - 同步叠加标的波动率：`HV30, HV60`
-- 新增日内 IV 板块：每个合约一张图，观察从起始日到到期前的分钟级 IV 走势，并叠加 HV30/HV60
+- 新增日内 IV 板块：按“合约-交易日”出图（一天一张图），避免把多天拼在一张图里，并叠加 HV30/HV60
 - 新增选约模式参数：
   - `selection_mode="near_next"`：沿用输入日近月+次近月
   - `selection_mode="expired_lifecycle"`：在回退日期附近自动匹配到期月，并按 `lifecycle_start_month_offsets`（默认 `[1,3]`）自动找起始交易日
@@ -81,7 +81,8 @@ panel = res["greeks_panel"]
 - `intraday_iv/intraday_iv_panel.csv`
 - `intraday_iv/intraday_iv_panel.parquet`
 - `intraday_iv/<symbol>.csv`
-- `intraday_iv/<symbol>.png`
+- `intraday_iv/<symbol>/<YYYYMMDD>.csv`
+- `intraday_iv/<symbol>/<YYYYMMDD>.png`
 
 ## 缓存目录
 
