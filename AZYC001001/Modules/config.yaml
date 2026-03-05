@@ -1,39 +1,53 @@
-﻿# 绛栫暐缂栧彿锛堢敤浜庤緭鍑轰笌鏍囪瘑锛?strategy_id: AZYC001001
+# 策略编号（用于输出与标识）
+strategy_id: AZYC001001
 
-# ETF 鏍囩殑浠ｇ爜锛坥ption_code 浼氳嚜鍔ㄤ粠杩欓噷鎻愬彇锛屽 159915锛?etf_symbol: S.CN.SZSE.159915
+# ETF 标的代码（option_code 可从这里自动提取，如 159915）
+etf_symbol: S.CN.SZSE.159915
 
-# 鍥炴祴璧锋鏃ユ湡锛堝惈棣栧熬锛?start_date: "2023-01-01"
+# 回测起止日期（含首尾）
+start_date: "2023-01-01"
 end_date: "2025-12-31"
 
-# 琛屾儏棰戠巼锛堝綋鍓嶆敮鎸?minute1锛?frequency: minute1
+# 行情频率（当前支持 minute1）
+frequency: minute1
 
-# Put 鐩爣鎵ц浠峰亸绉伙紙鐩爣=鐜颁环-鍋忕Щ锛?put_offset_abs: 0.15
-# Call 鐩爣鎵ц浠峰亸绉伙紙鐩爣=鐜颁环+鍋忕Щ锛?call_offset_abs: 0.05
-# 鍒版湡閫夋嫨瑙勫垯锛歯ear_month=杩戞湀锛宯ext_month_2nd=娆¤繎鏈?expiry_rule: near_month
+# Put 目标执行价偏移（目标=现价-偏移）
+put_offset_abs: 0.15
+# Call 目标执行价偏移（目标=现价+偏移）
+call_offset_abs: 0.05
+# 到期筛选规则：near_month=近月，next_month_2nd=次近月
+expiry_rule: near_month
 
-# 淇″彿 bar 鏈€灏忔垚浜ら噺杩囨护
+# 信号 bar 最小成交量过滤
 min_volume_signal: 10
-# 鎴愪氦 bar 鏈€灏忔垚浜ら噺杩囨护
+# 成交 bar 最小成交量过滤
 min_volume_fill: 10
 
-# 鏈熸潈鍗曞紶鎵嬬画璐?cost_option_fee_per_contract: 0.0
-# 鏈熸潈婊戠偣锛坱ick锛?cost_option_slippage_ticks: 0.0
-# ETF 鎵嬬画璐圭巼
+# 期权单张手续费
+cost_option_fee_per_contract: 0.0
+# 期权滑点（tick）
+cost_option_slippage_ticks: 0.0
+# ETF 手续费率
 cost_etf_fee_rate: 0.0
-# ETF 婊戠偣锛坆ps锛?cost_etf_slippage_bps: 0.0
+# ETF 滑点（bps）
+cost_etf_slippage_bps: 0.0
 
-# 鍥哄畾鏈噾锛堜笉澶嶅埄锛夛紝鐢ㄤ簬 capital 妯″紡瀹氫粨
+# 固定本金（不复利），用于 capital 模式定仓
 initial_capital: 1000000.0
-# 瀹氫粨妯″紡锛歝apital=鎸夋湰閲戯紝fixed=鎸夊浐瀹氬紶鏁?contract_sizing: capital
-# 鏃犻闄╁埄鐜囷紙鐢ㄤ簬澶忔櫘绛夋寚鏍囷級
+# 定仓模式：capital=按本金，fixed=按固定张数
+contract_sizing: capital
+# 无风险利率（用于夏普等指标）
 risk_free_rate: 0.0
 
-# 鏄惁鍚敤鏈湴缂撳瓨
+# 是否启用本地缓存
 use_disk_cache: true
-# 鍏变韩缂撳瓨鐩綍锛堣法绛栫暐澶嶇敤锛?cache_dir: ../../DataCache
+# 共享缓存目录（跨策略复用）
+cache_dir: ../../DataCache
 
-# 鏃ュ唴浠庤鏃堕棿寮€濮嬫壂鎻忔柊寮€浠?entry_start_time: "09:30:00"
-# 浠呭鈥滃洖娴嬭捣濮嬮樁娈碘€濈敓鏁堬細璧峰鏃ュ悗寤惰繜鍑犲ぉ鎵嶅厑璁搁娆″紑浠擄紙0=璧峰鏃ュ嵆鍙紑锛?trade_start_offset_days: 0
+# 日内从该时间开始扫描新开仓
+entry_start_time: "09:30:00"
+# 仅对“回测起始阶段”生效：起始日后延迟几天才允许首次开仓（0=起始日即可开）
+trade_start_offset_days: 0
 
-# 杈撳嚭鐩綍锛堢浉瀵?config 鏂囦欢锛?output_dir: ../outputs
-
+# 输出目录（相对 config 文件）
+output_dir: ../outputs
