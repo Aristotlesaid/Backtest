@@ -19,13 +19,20 @@
    - `short_call_strike_target = S + c`
    - `long_call_strike_target = S + d`
 3. 默认参数：`a=0.10, b=0.20, c=0.10, d=0.20`。
-4. 翼宽约束：`long_put_strike < short_put_strike`，`long_call_strike > short_call_strike`。
-5. 到期筛选：`expiry_rule` 与 AZYC001001 一致（`near_month`/`next_month_2nd`）。
-6. 成交规则：信号分钟触发，下一根 bar `OPEN` 成交。
-7. 流动性过滤：信号 bar 与成交 bar 都要求 `VOLUME > threshold`。
-8. 管理规则：开仓后持有到到期，不做提前止盈止损。
-9. 到期结算：现金结算四腿内在价值，不生成 ETF 实物持仓。
-10. 开仓节奏：组合到期平掉后，同日不重开，次日再开下一组。
+4. 可选 Delta 选约：支持 `strike_selection_mode=delta`，目标 Delta 由配置给定。
+5. 翼宽约束：`long_put_strike < short_put_strike`，`long_call_strike > short_call_strike`。
+6. 到期筛选：`expiry_rule` 与 AZYC001001 一致（`near_month`/`next_month_2nd`）。
+7. 成交规则：信号分钟触发，下一根 bar `OPEN` 成交。
+8. 流动性过滤：信号 bar 与成交 bar 都要求 `VOLUME > threshold`。
+9. 管理规则：开仓后持有到到期，不做提前止盈止损。
+10. 到期结算：现金结算四腿内在价值，不生成 ETF 实物持仓。
+11. 开仓节奏：组合到期平掉后，同日不重开，次日再开下一组。
+
+## IV Rank 过滤
+1. 支持 `use_iv_rank_filter=true` 时仅在 `IV Rank >= iv_rank_entry_min` 开新仓。
+2. ATM IV 估算复用 `ResearchIV/modules/iv_solver.py`（`implied_vol_newton` / `bs_greeks` 体系）。
+3. IV Rank 口径：`(IV_now - min(lookback)) / (max(lookback) - min(lookback))`。
+4. 历史样本不足 `iv_rank_min_history` 时，当日不入场。
 
 ## 定仓与风险口径
 1. `fixed` 模式：每次固定开 `fixed_contracts` 组。
@@ -54,10 +61,13 @@
 ## 关键配置项（`modules/config.yaml`）
 1. `strategy_id`, `etf_symbol`, `start_date`, `end_date`, `frequency`
 2. `short_put_offset_abs`, `long_put_offset_abs`, `short_call_offset_abs`, `long_call_offset_abs`
-3. `expiry_rule`, `min_volume_signal`, `min_volume_fill`
-4. `contract_sizing`, `initial_capital`, `fixed_contracts`
-5. 成本参数：`cost_option_fee_per_contract`, `cost_option_slippage_ticks`
-6. 缓存与输出：`use_disk_cache`, `cache_dir`, `output_dir`
+3. `strike_selection_mode`, `short_put_target_delta`, `long_put_target_delta`, `short_call_target_delta`, `long_call_target_delta`
+4. `expiry_rule`, `min_volume_signal`, `min_volume_fill`
+5. `use_iv_rank_filter`, `iv_rank_entry_min`, `iv_rank_lookback_days`, `iv_rank_min_history`
+6. `dividend_yield`, `risk_free_rate`
+7. `contract_sizing`, `initial_capital`, `fixed_contracts`
+8. 成本参数：`cost_option_fee_per_contract`, `cost_option_slippage_ticks`
+9. 缓存与输出：`use_disk_cache`, `cache_dir`, `output_dir`
 
 ## 验收要点
 1. 四腿可同时选出且同到期，翼宽方向正确。

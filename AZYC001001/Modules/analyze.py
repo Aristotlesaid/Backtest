@@ -598,14 +598,26 @@ def _plot_position_state(positions: pd.DataFrame, path: Path, strategy_label: st
     pos = pos.sort_values("ts").reset_index(drop=True)
     state_col = pos.get("state", "").astype(str)
 
-    # 状态机映射：0=空仓，1=卖PUT阶段，2=持有现货并卖CALL阶段
-    state_to_code = {"FLAT": 0, "SHORT_PUT": 1, "LONG_ETF_SHORT_CALL": 2}
+    preferred_order = ["FLAT", "SHORT_PUT", "SHORT_CONDOR", "LONG_ETF_SHORT_CALL"]
+    pretty_name = {
+        "FLAT": "Flat",
+        "SHORT_PUT": "Short Put",
+        "SHORT_CONDOR": "Short Condor",
+        "LONG_ETF_SHORT_CALL": "Long ETF + Short Call",
+    }
+
+    observed = [x for x in state_col.dropna().astype(str).unique().tolist() if x]
+    ordered = [x for x in preferred_order if x in observed] + [x for x in observed if x not in preferred_order]
+    if not ordered:
+        ordered = ["FLAT"]
+
+    state_to_code = {name: i for i, name in enumerate(ordered)}
     pos["state_code"] = state_col.map(state_to_code).fillna(0).astype(int)
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.step(pos["ts"], pos["state_code"], where="post", linewidth=1.6, color="#1f77b4")
-    ax.set_yticks([0, 1, 2])
-    ax.set_yticklabels(["空仓", "持有PUT", "持有现货(卖CALL)"])
+    ax.set_yticks(list(range(len(ordered))))
+    ax.set_yticklabels([pretty_name.get(x, x) for x in ordered])
     ax.set_xlabel("Time")
     ax.set_ylabel("State")
     ax.set_title(f"{strategy_label} Position State Timeline")
