@@ -1,0 +1,34 @@
+strategy_id: AZYC002001
+
+etf_symbol: S.CN.SZSE.159915
+
+start_date: "2023-01-01"
+end_date: "2025-12-31"
+frequency: minute1
+
+short_put_offset_abs: 0.10
+long_put_offset_abs: 0.20
+short_call_offset_abs: 0.10
+long_call_offset_abs: 0.20
+expiry_rule: near_month
+
+min_volume_signal: 10
+min_volume_fill: 10
+
+cost_option_fee_per_contract: 0.0
+cost_option_slippage_ticks: 0.0
+cost_etf_fee_rate: 0.0
+cost_etf_slippage_bps: 0.0
+
+initial_capital: 1000000.0
+contract_sizing: capital
+fixed_contracts: 1
+risk_free_rate: 0.0
+
+use_disk_cache: true
+cache_dir: ../../DataCache
+
+entry_start_time: "09:30:00"
+trade_start_offset_days: 0
+
+output_dir: ../outputs

@@ -19,6 +19,7 @@ def analyze(
     result_dir: str | Path,
     initial_capital: float = 1_000_000.0,
     risk_free_rate: float = 0.0,
+    strategy_id: str = "AZYC001001",
 ) -> Dict[str, Any]:
     out_dir = Path(result_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -51,12 +52,14 @@ def analyze(
     excess_benchmark_path = out_dir / "excess_vs_benchmark.png"
     position_state_path = out_dir / "position_state.png"
 
-    _plot_equity_curve(daily_enriched, equity_curve_path)
-    _plot_drawdown(daily_enriched, drawdown_path)
-    _plot_monthly_pnl(daily_enriched, monthly_pnl_path)
-    _plot_rolling_sharpe(daily_enriched, rolling_sharpe_path)
-    _plot_excess_vs_benchmark(daily_enriched, excess_benchmark_path)
-    _plot_position_state(positions, position_state_path)
+    strategy_label = str(strategy_id).strip() or "Strategy"
+
+    _plot_equity_curve(daily_enriched, equity_curve_path, strategy_label)
+    _plot_drawdown(daily_enriched, drawdown_path, strategy_label)
+    _plot_monthly_pnl(daily_enriched, monthly_pnl_path, strategy_label)
+    _plot_rolling_sharpe(daily_enriched, rolling_sharpe_path, strategy_label)
+    _plot_excess_vs_benchmark(daily_enriched, excess_benchmark_path, strategy_label)
+    _plot_position_state(positions, position_state_path, strategy_label)
 
     return {
         "metrics": metrics,
@@ -460,7 +463,7 @@ def _pnl_at_or_before(daily: pd.DataFrame, target_date, inclusive: bool) -> floa
     return float(pd.to_numeric(sub["total_pnl_cum"], errors="coerce").fillna(0.0).iloc[-1])
 
 
-def _plot_equity_curve(daily: pd.DataFrame, path: Path) -> None:
+def _plot_equity_curve(daily: pd.DataFrame, path: Path, strategy_label: str) -> None:
     if daily.empty:
         return
 
@@ -470,7 +473,7 @@ def _plot_equity_curve(daily: pd.DataFrame, path: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(series["date"], series["equity_curve"], linewidth=1.5)
-    ax.set_title("AZYC001001 Equity Curve")
+    ax.set_title(f"{strategy_label} Equity Curve")
     ax.set_xlabel("Date")
     ax.set_ylabel("Equity")
     ax.grid(alpha=0.3)
@@ -479,7 +482,7 @@ def _plot_equity_curve(daily: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_drawdown(daily: pd.DataFrame, path: Path) -> None:
+def _plot_drawdown(daily: pd.DataFrame, path: Path, strategy_label: str) -> None:
     if daily.empty:
         return
 
@@ -490,7 +493,7 @@ def _plot_drawdown(daily: pd.DataFrame, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.fill_between(series["date"], series["drawdown"], 0.0, alpha=0.35)
     ax.plot(series["date"], series["drawdown"], linewidth=1.2)
-    ax.set_title("AZYC001001 Drawdown")
+    ax.set_title(f"{strategy_label} Drawdown")
     ax.set_xlabel("Date")
     ax.set_ylabel("Drawdown")
     ax.grid(alpha=0.3)
@@ -499,7 +502,7 @@ def _plot_drawdown(daily: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_monthly_pnl(daily: pd.DataFrame, path: Path) -> None:
+def _plot_monthly_pnl(daily: pd.DataFrame, path: Path, strategy_label: str) -> None:
     if daily.empty:
         return
 
@@ -514,7 +517,7 @@ def _plot_monthly_pnl(daily: pd.DataFrame, path: Path) -> None:
     colors = ["#2ca02c" if x >= 0 else "#d62728" for x in monthly["daily_pnl"]]
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.bar(monthly["month"], monthly["daily_pnl"], color=colors, alpha=0.8)
-    ax.set_title("AZYC001001 Monthly PnL")
+    ax.set_title(f"{strategy_label} Monthly PnL")
     ax.set_xlabel("Month")
     ax.set_ylabel("PnL")
     ax.tick_params(axis="x", rotation=45)
@@ -524,7 +527,7 @@ def _plot_monthly_pnl(daily: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_rolling_sharpe(daily: pd.DataFrame, path: Path) -> None:
+def _plot_rolling_sharpe(daily: pd.DataFrame, path: Path, strategy_label: str) -> None:
     if daily.empty or "rolling_sharpe_60d" not in daily.columns:
         return
 
@@ -535,7 +538,7 @@ def _plot_rolling_sharpe(daily: pd.DataFrame, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(series["date"], series["rolling_sharpe_60d"], linewidth=1.2)
     ax.axhline(0.0, linewidth=1.0, color="gray", alpha=0.7)
-    ax.set_title("AZYC001001 Rolling Sharpe (60D)")
+    ax.set_title(f"{strategy_label} Rolling Sharpe (60D)")
     ax.set_xlabel("Date")
     ax.set_ylabel("Sharpe")
     ax.grid(alpha=0.3)
@@ -544,7 +547,7 @@ def _plot_rolling_sharpe(daily: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_excess_vs_benchmark(daily: pd.DataFrame, path: Path) -> None:
+def _plot_excess_vs_benchmark(daily: pd.DataFrame, path: Path, strategy_label: str) -> None:
     required = {"equity_curve", "benchmark_equity", "excess_equity", "date"}
     if daily.empty or not required.issubset(set(daily.columns)):
         return
@@ -559,7 +562,7 @@ def _plot_excess_vs_benchmark(daily: pd.DataFrame, path: Path) -> None:
 
     axes[0].plot(series["date"], series["equity_curve"], label="Strategy Equity", linewidth=1.5)
     axes[0].plot(series["date"], series["benchmark_equity"], label="Benchmark Buy&Hold ETF", linewidth=1.3)
-    axes[0].set_title("AZYC001001 Strategy vs Benchmark")
+    axes[0].set_title(f"{strategy_label} Strategy vs Benchmark")
     axes[0].set_ylabel("Equity")
     axes[0].grid(alpha=0.3)
     axes[0].legend(loc="best")
@@ -577,7 +580,7 @@ def _plot_excess_vs_benchmark(daily: pd.DataFrame, path: Path) -> None:
     plt.close(fig)
 
 
-def _plot_position_state(positions: pd.DataFrame, path: Path) -> None:
+def _plot_position_state(positions: pd.DataFrame, path: Path, strategy_label: str) -> None:
     if positions.empty:
         return
 
@@ -605,7 +608,7 @@ def _plot_position_state(positions: pd.DataFrame, path: Path) -> None:
     ax.set_yticklabels(["空仓", "持有PUT", "持有现货(卖CALL)"])
     ax.set_xlabel("Time")
     ax.set_ylabel("State")
-    ax.set_title("AZYC001001 Position State Timeline")
+    ax.set_title(f"{strategy_label} Position State Timeline")
     ax.grid(alpha=0.3)
 
     fig.tight_layout()
