@@ -69,6 +69,11 @@
 8. 成本参数：`cost_option_fee_per_contract`, `cost_option_slippage_ticks`
 9. 缓存与输出：`use_disk_cache`, `cache_dir`, `output_dir`
 
+## 快速回测
+1. 提供 `modules/config_short.yaml` 作为短区间 smoke 配置（`2025-01-01` 到 `2025-02-28`）。
+2. 运行命令：`python -m AZYC002001.modules.run_backtest --config AZYC002001/modules/config_short.yaml`
+3. 产出目录：`AZYC002001/outputs_smoke_short`
+
 ## 验收要点
 1. 四腿可同时选出且同到期，翼宽方向正确。
 2. 开仓成交严格遵守下一 bar + 双成交量过滤。
