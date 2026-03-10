@@ -199,8 +199,82 @@ class CausisDataLoader:
         start = pd.Timestamp(self.start_date)
         end = pd.Timestamp(self.end_date)
 
-        frames = []
+        try:
+            raw = self._retry_on_timeout(
+                get_price,
+                symbol,
+                start_date=start.strftime("%Y-%m-%d"),
+                end_date=end.strftime("%Y-%m-%d"),
+                frequency=self.frequency,
+            )
+            frame = self._normalize_price_bars(raw, default_symbol=symbol)
+            if not frame.empty:
+                return self._merge_price_frames([frame], symbol)
+        except Exception as exc:
+            logger.warning(
+                "get_price(%s, %s~%s) failed, fallback to chunk mode: %s",
+                symbol,
+                start.strftime("%Y-%m-%d"),
+                end.strftime("%Y-%m-%d"),
+                exc,
+            )
+
+        frames = self._fetch_price_bars_chunked(symbol, start, end, chunk_days=31)
+        if frames:
+            return self._merge_price_frames(frames, symbol)
+
+        return self._empty_bars(symbol)
+
+    def _fetch_price_bars_chunked(
+        self,
+        symbol: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        chunk_days: int = 31,
+    ) -> list[pd.DataFrame]:
+        frames: list[pd.DataFrame] = []
+        step = max(1, int(chunk_days))
         cursor = start
+
+        while cursor <= end:
+            chunk_end = min(cursor + pd.Timedelta(days=step - 1), end)
+            start_str = cursor.strftime("%Y-%m-%d")
+            end_str = chunk_end.strftime("%Y-%m-%d")
+
+            try:
+                raw = self._retry_on_timeout(
+                    get_price,
+                    symbol,
+                    start_date=start_str,
+                    end_date=end_str,
+                    frequency=self.frequency,
+                )
+                frame = self._normalize_price_bars(raw, default_symbol=symbol)
+                if not frame.empty:
+                    frames.append(frame)
+            except Exception as exc:
+                logger.warning(
+                    "get_price(%s, %s~%s) failed, fallback to daily mode: %s",
+                    symbol,
+                    start_str,
+                    end_str,
+                    exc,
+                )
+                frames.extend(self._fetch_price_bars_day_by_day(symbol, cursor, chunk_end))
+
+            cursor = chunk_end + pd.Timedelta(days=1)
+
+        return frames
+
+    def _fetch_price_bars_day_by_day(
+        self,
+        symbol: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> list[pd.DataFrame]:
+        frames: list[pd.DataFrame] = []
+        cursor = start
+
         while cursor <= end:
             date_str = cursor.strftime("%Y-%m-%d")
             try:
@@ -211,18 +285,20 @@ class CausisDataLoader:
                     end_date=date_str,
                     frequency=self.frequency,
                 )
+                frame = self._normalize_price_bars(raw, default_symbol=symbol)
+                if not frame.empty:
+                    frames.append(frame)
             except Exception as exc:
                 logger.warning("get_price(%s, %s) failed, skip day: %s", symbol, date_str, exc)
-                cursor += pd.Timedelta(days=1)
-                continue
 
-            frame = self._normalize_price_bars(raw, default_symbol=symbol)
-            if not frame.empty:
-                frames.append(frame)
             cursor += pd.Timedelta(days=1)
 
+        return frames
+
+    @staticmethod
+    def _merge_price_frames(frames: list[pd.DataFrame], symbol: str) -> pd.DataFrame:
         if not frames:
-            return self._empty_bars(symbol)
+            return CausisDataLoader._empty_bars(symbol)
 
         bars = pd.concat(frames, ignore_index=False)
         bars = bars.reset_index(drop=True)
